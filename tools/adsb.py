@@ -167,6 +167,28 @@ def demod_frames(iq, thresh_ratio=1.5):
     return out
 
 
+def rescue_blind(bits, max_flips=2):
+    """The dump1090-style baseline: exhaustive single-bit scan, then
+    adjacent double-bit scan - no confidence, pure CRC search. Returns
+    (fixed_bits, n_flips, n_tries)."""
+    tries = 0
+    for i in range(112):
+        b2 = bits.copy()
+        b2[i] ^= 1
+        tries += 1
+        if crc24(b2) == 0:
+            return b2, 1, tries
+    if max_flips >= 2:
+        for i in range(111):
+            b2 = bits.copy()
+            b2[i] ^= 1
+            b2[i + 1] ^= 1
+            tries += 1
+            if crc24(b2) == 0:
+                return b2, 2, tries
+    return None, 0, tries
+
+
 def rescue(bits, conf, max_flips=2):
     """Confidence-guided repair: try flipping the weakest 1-2 bits.
     (The smarter cousin of dump1090's blind single-bit scan.)"""
