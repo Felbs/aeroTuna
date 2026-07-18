@@ -360,6 +360,15 @@ def cmd_capture(args):
     print(f"[capture] {args.secs:.0f}s live @ 1090 MHz on {args.antenna} ...")
     t0 = time.time()
     iq = capture_iq(args.secs, args.antenna, args.gain)
+    if getattr(args, "save_iq", False):
+        import json as _json
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        out = LAB / f"adsb_{stamp}.cs16"
+        (np.round(np.column_stack([iq.real, iq.imag]).ravel() * 32767)
+         .astype(np.int16)).tofile(out)
+        _json.dump({"freq_hz": FREQ, "fs_hz": FS, "format": "cs16",
+                    "n_samples": len(iq)}, open(str(out) + ".json", "w"))
+        print(f"[corpus] saved {out.name} ({len(iq)*4/1e6:.0f} MB) - H1/H2 replay material")
     print(f"[capture] {len(iq)/FS:.1f}s captured, analyzing ...")
     res = analyze(iq)
     dt = time.time() - t0
@@ -408,6 +417,8 @@ def main():
     c.add_argument("--secs", type=float, default=20)
     c.add_argument("--antenna", default="Antenna B")
     c.add_argument("--gain", type=float, default=45)
+    c.add_argument("--save-iq", action="store_true",
+                   help="archive the raw IQ for replay A/B (H1/H2 corpus)")
     s = sub.add_parser("shootout")
     s.add_argument("--secs", type=float, default=15)
     s.add_argument("--gain", type=float, default=45)
