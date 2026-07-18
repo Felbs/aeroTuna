@@ -82,6 +82,13 @@ def run(files):
 
 
 if __name__ == "__main__":
-    files = sys.argv[1:] or [str(Path(r"Z:\SDR_Agent_v2\corpus")
-                                 .glob("adsb_*.cs16").__next__())]
+    files = sys.argv[1:]
+    if not files:
+        lab = Path(__file__).resolve().parent.parent / "lab"
+        found = sorted(lab.glob("adsb_*.cs16")) if lab.is_dir() else []
+        if not found:
+            sys.exit("usage: rescue_ab.py <capture.cs16> [...]\n"
+                     "(or place adsb_*.cs16 captures in the repo's lab/ dir; "
+                     "record one with:  python tools/adsb.py capture --secs 60)")
+        files = [str(found[-1])]
     run(files)

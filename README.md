@@ -19,6 +19,18 @@ messages from weak, distant aircraft.
 **+81 recovered by confidence-guided rescue** — 2.7× more traffic than the
 raw demod alone. 17 aircraft decoded, callsigns and all.
 
+## Quickstart
+```bash
+git clone https://github.com/Felbs/aeroTuna.git
+cd aeroTuna
+python tools/adsb.py selftest            # proves the whole pipeline - no radio needed
+python tools/adsb.py capture --secs 20   # live 1090 MHz (needs an SDR, see below)
+```
+**Dependencies:** `numpy`, `numba`, and the `SoapySDR` python bindings +
+a driver for your SDR. Easiest path on any OS is
+[radioconda](https://github.com/ryanvolz/radioconda) (has all three);
+on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soapysdr-module-all`.
+
 ## Tools
 | Command | What it does |
 |---|---|
