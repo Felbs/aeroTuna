@@ -655,6 +655,12 @@ def _grab(sdr, st, n_want, max_stall_s=20.0):
             out[2 * got: 2 * (got + n)] = buf[:2 * n]
             got += n
             last_progress = time.time()
+        elif r.ret == -4:
+            # SOAPY_SDR_OVERFLOW: samples dropped (routine right after a
+            # retune on the RSPdx). Recoverable — keep reading. Killed the
+            # first live run 8/01 when treated as fatal. The stall guard
+            # below still catches a stream that stops delivering entirely.
+            continue
         elif r.ret < 0 and r.ret != -1:
             raise RuntimeError(f"readStream error {r.ret}")
         if time.time() - last_progress > max_stall_s:
@@ -710,9 +716,16 @@ def cmd_live(args):
                 iq, got = _grab(sdr, st, n_want, max_stall_s=20.0)
                 wall = time.time() - t0
                 radio_lock.heartbeat()
-                if got < 0.95 * n_want or wall > 2.0 * dwell:
+                # The integrity law (7/31/8-01) is about SAMPLE COUNT, not
+                # wall time. Overflow recovery legitimately stretches the
+                # wall clock while still delivering every sample — this loop
+                # got 30720000/30720000 and the old `wall > 2*dwell` clause
+                # rejected all of it anyway. A short SAMPLE read is data loss;
+                # a slow-but-complete read is fine. Gate on samples only.
+                if got < 0.95 * n_want:
                     print(f"[live] capture-integrity FAIL on {mhz:.3f}: "
-                          f"{got}/{n_want} in {wall:.1f}s - skipping chunk")
+                          f"{got}/{n_want} samples ({wall:.1f}s wall) "
+                          f"- dropped, skipping chunk")
                     continue
                 msgs = decode_iq(iq)
                 if msgs:
