@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>aeroTuna ATC</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #04070a;
+    --panel: #0a1014;
+    --edge: #17242b;
+    --ink: #d6e8dc;
+    --muted: #6f8a7c;
+    --faint: #3d5348;
+    --phos: #5cff9d;          /* the one series color: aircraft */
+    --phos-dim: rgba(92,255,157,.35);
+    --grid: rgba(110,255,160,.13);
+    --ok: #5cff9d;
+    --warn: #ffc966;
+    --err: #ff7a76;
+    --sel: #ffffff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 13px/1.45 Consolas, "Cascadia Mono", Menlo, monospace;
+    display: flex; overflow: hidden;
+  }
+  #scopewrap { flex: 1; position: relative; min-width: 0; }
+  #scope { position: absolute; inset: 0; width: 100%; height: 100%;
+           cursor: crosshair; }
+  #offline {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--err); color: var(--err);
+    padding: 4px 14px; display: none; letter-spacing: .1em;
+  }
+  #hint {
+    position: absolute; left: 10px; bottom: 8px; color: var(--faint);
+    font-size: 11px; user-select: none;
+  }
+  /* ---------- sidebar ---------- */
+  #side {
+    width: 320px; background: var(--panel); border-left: 1px solid var(--edge);
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  header { padding: 12px 14px 8px; border-bottom: 1px solid var(--edge); }
+  header h1 { font-size: 14px; letter-spacing: .25em; font-weight: 700; }
+  header h1 span { color: var(--phos); }
+  header .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  #tiles {
+    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1px;
+    background: var(--edge); border-bottom: 1px solid var(--edge);
+  }
+  .tile { background: var(--panel); padding: 8px 6px 7px; text-align: center; }
+  .tile .v { font-size: 19px; font-weight: 700; color: var(--ink); }
+  .tile .l { font-size: 9px; letter-spacing: .12em; color: var(--muted);
+             margin-top: 1px; }
+  #sdrline {
+    padding: 7px 14px; border-bottom: 1px solid var(--edge);
+    font-size: 11px; color: var(--muted); display: flex; align-items: center;
+    gap: 7px; flex-wrap: wrap;
+  }
+  #sdrdot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted);
+            flex-shrink: 0; }
+  #sdrstate { font-weight: 700; letter-spacing: .08em; }
+  #sdrdetail { width: 100%; color: var(--faint); }
+  #tuner {
+    display: flex; gap: 6px; padding: 8px 14px;
+    border-bottom: 1px solid var(--edge); align-items: center;
+  }
+  #tuner select, #tuner input, #tuner button {
+    background: var(--bg); color: var(--ink); border: 1px solid var(--edge);
+    font: inherit; font-size: 11px; padding: 3px 6px;
+  }
+  #tuner input { width: 52px; }
+  #tuner button { cursor: pointer; color: var(--phos); border-color: var(--faint); }
+  #tuner button:hover { border-color: var(--phos); }
+  #strips { flex: 1; overflow-y: auto; }
+  .strip {
+    padding: 6px 14px 5px; border-bottom: 1px solid var(--edge);
+    cursor: pointer; border-left: 3px solid transparent;
+  }
+  .strip:hover { background: #0d151a; }
+  .strip.sel { border-left-color: var(--sel); background: #0e161b; }
+  .strip.nofix { border-left-color: var(--faint); }
+  .strip .r1 { display: flex; justify-content: space-between; }
+  .strip .cs { font-weight: 700; color: var(--ink); }
+  .strip .icao { color: var(--muted); font-size: 11px; }
+  .strip .r2 { display: flex; gap: 12px; color: var(--muted); font-size: 11px;
+               margin-top: 1px; }
+  .strip .r2 b { color: var(--ink); font-weight: 400; }
+  .strip .tagnofix { color: var(--warn); font-size: 10px; letter-spacing: .1em; }
+  .strip .ext { color: var(--muted); font-size: 10.5px; margin-top: 3px;
+                line-height: 1.5; display: none; }
+  .strip.sel .ext { display: block; }
+  .strip .old { color: var(--faint); }
+  #empty { padding: 22px 14px; color: var(--faint); font-size: 11px; }
+  footer { padding: 6px 14px; border-top: 1px solid var(--edge);
+           color: var(--faint); font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="scopewrap">
+  <canvas id="scope"></canvas>
+  <div id="offline">PANEL OFFLINE</div>
+  <div id="hint">drag pan &middot; wheel zoom &middot; R recenter &middot;
+    S sweep &middot; click blip/strip select</div>
+</div>
+<div id="side">
+  <header>
+    <h1>AERO<span>TUNA</span> ATC</h1>
+    <div class="sub">1090&nbsp;MHz &middot; confidence-plane decoder</div>
+  </header>
+  <div id="tiles">
+    <div class="tile"><div class="v" id="t_ac">&ndash;</div><div class="l">AIRCRAFT</div></div>
+    <div class="tile"><div class="v" id="t_msg">&ndash;</div><div class="l">MSG/MIN</div></div>
+    <div class="tile"><div class="v" id="t_resc">&ndash;</div><div class="l">RESCUED</div></div>
+    <div class="tile"><div class="v" id="t_del">&ndash;</div><div class="l">DELIVERY</div></div>
+  </div>
+  <div id="sdrline">
+    <div id="sdrdot"></div><span id="sdrstate">&ndash;</span>
+    <span id="sdrant"></span>
+    <span id="sdrdetail"></span>
+  </div>
+  <div id="tuner">
+    <select id="ant">
+      <option>Antenna A</option><option>Antenna B</option><option>Antenna C</option>
+    </select>
+    <input id="gain" type="number" min="20" max="59" step="1" title="gain dB">
+    <button id="apply">APPLY</button>
+  </div>
+  <div id="strips"></div>
+  <div id="empty" style="display:none">listening &hellip; no aircraft yet</div>
+  <footer>rescued = messages that exist only because of the confidence
+    plane &middot; delivery = samples vs wall&times;fs</footer>
+</div>
+
+<script>
+"use strict";
+const cv = document.getElementById("scope"), cx2 = cv.getContext("2d");
+const S = {
+  data: null, fetchedAt: 0, ok: false,
+  center: null,            // [lat, lon]
+  pxPerNm: 6,              // zoom
+  sel: null, sweep: true, sweepA: 0,
+  drag: null, tunerTouched: false,
+};
+
+/* ---------------- geometry ---------------- */
+function toXY(lat, lon) {           // nm east/north of center -> canvas px
+  const [la0, lo0] = S.center;
+  const e = (lon - lo0) * 60 * Math.cos(la0 * Math.PI / 180);
+  const n = (lat - la0) * 60;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  return [w / 2 + e * S.pxPerNm, h / 2 - n * S.pxPerNm];
+}
+function reckon(a, dt) {            // dead-reckon along track
+  if (a.speed_kt == null || a.track_deg == null || dt <= 0 || dt > 30)
+    return [a.lat, a.lon];
+  const d = a.speed_kt * dt / 3600;             // nm travelled
+  const tr = a.track_deg * Math.PI / 180;
+  const lat = a.lat + d * Math.cos(tr) / 60;
+  const lon = a.lon + d * Math.sin(tr) / (60 * Math.cos(lat * Math.PI / 180));
+  return [lat, lon];
+}
+function centroid(list) {
+  const p = list.filter(a => a.lat != null);
+  if (!p.length) return null;
+  return [p.reduce((s, a) => s + a.lat, 0) / p.length,
+          p.reduce((s, a) => s + a.lon, 0) / p.length];
+}
+
+/* ---------------- render ---------------- */
+function ringStep() {
+  const view = Math.min(cv.clientWidth, cv.clientHeight) / 2 / S.pxPerNm;
+  for (const s of [1, 2, 5, 10, 20, 50, 100]) if (view / s <= 6) return s;
+  return 200;
+}
+function draw(ts) {
+  requestAnimationFrame(draw);
+  const w = cv.clientWidth, h = cv.clientHeight, dpr = devicePixelRatio || 1;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) {
+    cv.width = w * dpr; cv.height = h * dpr;
+  }
+  cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
+  const cxp = w / 2, cyp = h / 2;
+  const font = "11px Consolas, monospace";
+
+  /* rings + compass */
+  const step = ringStep();
+  cx2.strokeStyle = "rgba(110,255,160,.13)";
+  cx2.fillStyle = "#3d5348"; cx2.font = font;
+  const maxR = Math.hypot(w, h) / 2 / S.pxPerNm;
+  for (let r = step; r <= maxR; r += step) {
+    cx2.beginPath();
+    cx2.arc(cxp, cyp, r * S.pxPerNm, 0, 7);
+    cx2.stroke();
+    cx2.fillText(r + " nm", cxp + 4, cyp - r * S.pxPerNm - 4);
+  }
+  cx2.beginPath();                       // center cross
+  cx2.moveTo(cxp - 7, cyp); cx2.lineTo(cxp + 7, cyp);
+  cx2.moveTo(cxp, cyp - 7); cx2.lineTo(cxp, cyp + 7);
+  cx2.stroke();
+  for (let b = 0; b < 360; b += 30) {   // bearing ticks at scope edge
+    const rr = Math.min(w, h) / 2 - 14;
+    const x = cxp + rr * Math.sin(b * Math.PI / 180);
+    const y = cyp - rr * Math.cos(b * Math.PI / 180);
+    cx2.fillText(b === 0 ? "N" : b, x - 6, y + 4);
+  }
+
+  /* sweep */
+  if (S.sweep) {
+    S.sweepA = (ts / 4000 * 2 * Math.PI) % (2 * Math.PI);
+    const rr = Math.hypot(w, h);
+    const g = cx2.createConicGradient
+      ? (() => { const gg = cx2.createConicGradient(S.sweepA - Math.PI / 2, cxp, cyp);
+                 gg.addColorStop(0, "rgba(92,255,157,.10)");
+                 gg.addColorStop(.08, "rgba(92,255,157,0)");
+                 gg.addColorStop(1, "rgba(92,255,157,0)"); return gg; })()
+      : null;
+    if (g) { cx2.fillStyle = g; cx2.fillRect(0, 0, w, h); }
+    cx2.strokeStyle = "rgba(92,255,157,.25)";
+    cx2.beginPath(); cx2.moveTo(cxp, cyp);
+    cx2.lineTo(cxp + rr * Math.sin(S.sweepA), cyp - rr * Math.cos(S.sweepA));
+    cx2.stroke();
+  }
+
+  if (!S.data || !S.center) return;
+  const dtNet = (performance.now() - S.fetchedAt) / 1000;
+
+  for (const a of S.data.aircraft) {
+    if (a.lat == null) continue;
+    const age = a.age + dtNet;
+    if (age > 120) continue;
+    const alpha = age < 15 ? 1 : age < 45 ? .6 : .35;
+    const sel = a.icao === S.sel;
+
+    /* trail */
+    if (a.trail && a.trail.length > 1) {
+      for (let i = 0; i < a.trail.length - 1; i++) {
+        const [x, y] = toXY(a.trail[i][0], a.trail[i][1]);
+        cx2.fillStyle = `rgba(92,255,157,${.04 + .22 * i / a.trail.length})`;
+        cx2.fillRect(x - 1, y - 1, 2, 2);
+      }
+    }
+
+    const [lat, lon] = reckon(a, (a.pos_age || 0) + dtNet);
+    const [x, y] = toXY(lat, lon);
+    if (x < -60 || y < -60 || x > w + 60 || y > h + 60) continue;
+
+    /* leader line: 60 s of travel */
+    if (a.speed_kt != null && a.track_deg != null) {
+      const lead = a.speed_kt / 60 * S.pxPerNm;   // nm per minute -> px
+      const tr = a.track_deg * Math.PI / 180;
+      cx2.strokeStyle = sel ? "#ffffff" : `rgba(92,255,157,${alpha})`;
+      cx2.beginPath(); cx2.moveTo(x, y);
+      cx2.lineTo(x + lead * Math.sin(tr), y - lead * Math.cos(tr));
+      cx2.stroke();
+    }
+
+    /* blip */
+    cx2.strokeStyle = sel ? "#ffffff" : `rgba(92,255,157,${alpha})`;
+    cx2.lineWidth = sel ? 2 : 1.2;
+    cx2.strokeRect(x - 4, y - 4, 8, 8);
+    cx2.lineWidth = 1;
+
+    /* data block */
+    const cs = a.callsign || a.icao;
+    const alt = a.alt_ft != null
+      ? (a.alt_ft >= 18000 ? "FL" + Math.round(a.alt_ft / 100) : a.alt_ft + "ft")
+      : "---";
+    const vs = a.vr_fpm == null ? "" : a.vr_fpm > 200 ? "↑"
+             : a.vr_fpm < -200 ? "↓" : "";
+    const spd = a.speed_kt != null ? a.speed_kt + "kt" : "";
+    cx2.font = font;
+    cx2.fillStyle = sel ? "#ffffff" : `rgba(214,232,220,${alpha})`;
+    cx2.fillText(cs, x + 10, y - 2);
+    cx2.fillStyle = sel ? "#ffffff" : `rgba(111,138,124,${Math.max(alpha, .45)})`;
+    cx2.fillText(`${alt}${vs} ${spd}`, x + 10, y + 11);
+  }
+}
+requestAnimationFrame(draw);
+
+/* ---------------- sidebar ---------------- */
+function fmtStrip(a) {
+  const cs = a.callsign || "&mdash;";
+  const alt = a.alt_ft != null
+    ? (a.alt_ft >= 18000 ? "FL" + Math.round(a.alt_ft / 100) : a.alt_ft + "ft")
+    : "&mdash;";
+  const vs = a.vr_fpm == null ? "" : a.vr_fpm > 200 ? "&uarr;"
+           : a.vr_fpm < -200 ? "&darr;" : "";
+  const spd = a.speed_kt != null ? a.speed_kt + "kt" : "&mdash;";
+  const trk = a.track_deg != null
+    ? String(Math.round(a.track_deg)).padStart(3, "0") + "&deg;" : "&mdash;";
+  const oldc = a.age > 45 ? "old" : "";
+  const nofix = a.lat == null;
+  const pos = nofix ? "no position (waiting for CPR pair)"
+    : `${a.lat.toFixed(4)}, ${a.lon.toFixed(4)} (${Math.round(a.pos_age)}s)`;
+  const rp = a.msgs ? Math.round(100 * a.rescued / a.msgs) : 0;
+  return `<div class="strip ${a.icao === S.sel ? "sel" : ""} ${nofix ? "nofix" : ""}"
+       data-icao="${a.icao}">
+    <div class="r1 ${oldc}"><span class="cs">${cs}</span>
+      ${nofix ? '<span class="tagnofix">NO FIX</span>' : ""}
+      <span class="icao">${a.icao}</span></div>
+    <div class="r2 ${oldc}"><span><b>${alt}</b>${vs}</span><span><b>${spd}</b></span>
+      <span><b>${trk}</b></span>
+      <span style="margin-left:auto">${Math.round(a.age)}s</span></div>
+    <div class="ext">pos ${pos}<br>
+      msgs ${a.msgs} &middot; rescued ${a.rescued} (${rp}%)</div>
+  </div>`;
+}
+function renderSide() {
+  const d = S.data; if (!d) return;
+  const st = d.stats;
+  document.getElementById("t_ac").textContent = st.aircraft;
+  document.getElementById("t_msg").textContent = st.msg_min;
+  document.getElementById("t_resc").textContent = st.rescued_60;
+  const del = d.sdr.delivery;
+  document.getElementById("t_del").textContent = del == null ? "–" : del + "%";
+  const dot = document.getElementById("sdrdot");
+  const stEl = document.getElementById("sdrstate");
+  const map = { RUNNING: "var(--ok)", REPLAY: "var(--ok)",
+                BUSY: "var(--warn)", YIELDED: "var(--warn)",
+                STARTING: "var(--warn)", STALLED: "var(--err)",
+                ERROR: "var(--err)", STOPPED: "var(--err)" };
+  dot.style.background = map[d.sdr.state] || "var(--muted)";
+  stEl.textContent = d.sdr.state;
+  stEl.style.color = map[d.sdr.state] || "var(--muted)";
+  document.getElementById("sdrant").textContent =
+    `${d.sdr.antenna} · ${d.sdr.gain} dB` +
+    (d.sdr.lock ? " · lock" : "");
+  document.getElementById("sdrdetail").textContent = d.sdr.detail || "";
+  if (!S.tunerTouched) {
+    document.getElementById("ant").value = d.sdr.antenna;
+    document.getElementById("gain").value = d.sdr.gain;
+  }
+  const box = document.getElementById("strips");
+  document.getElementById("empty").style.display =
+    d.aircraft.length ? "none" : "block";
+  box.innerHTML = d.aircraft.map(fmtStrip).join("");
+  for (const el of box.querySelectorAll(".strip"))
+    el.onclick = () => { S.sel = S.sel === el.dataset.icao
+                         ? null : el.dataset.icao; renderSide(); };
+}
+
+/* ---------------- polling ---------------- */
+async function poll() {
+  try {
+    const r = await fetch("/state.json");
+    S.data = await r.json();
+    S.fetchedAt = performance.now();
+    S.ok = true;
+    if (!S.center) {
+      const c = centroid(S.data.aircraft);
+      if (c) S.center = c;
+    }
+    renderSide();
+  } catch (e) { S.ok = false; }
+  document.getElementById("offline").style.display = S.ok ? "none" : "block";
+}
+setInterval(poll, 1000); poll();
+
+/* ---------------- interaction ---------------- */
+cv.addEventListener("mousedown", e => {
+  S.drag = { x: e.clientX, y: e.clientY, moved: false };
+});
+window.addEventListener("mousemove", e => {
+  if (!S.drag || !S.center) return;
+  const dx = e.clientX - S.drag.x, dy = e.clientY - S.drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) S.drag.moved = true;
+  S.drag.x = e.clientX; S.drag.y = e.clientY;
+  const [la0] = S.center;
+  S.center = [S.center[0] + dy / S.pxPerNm / 60,
+              S.center[1] - dx / S.pxPerNm / 60 / Math.cos(la0 * Math.PI / 180)];
+});
+window.addEventListener("mouseup", e => {
+  if (S.drag && !S.drag.moved && S.data && S.center) {
+    /* click-select nearest blip within 18 px */
+    const rect = cv.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    let best = null, bd = 18;
+    for (const a of S.data.aircraft) {
+      if (a.lat == null) continue;
+      const [x, y] = toXY(a.lat, a.lon);
+      const d = Math.hypot(x - mx, y - my);
+      if (d < bd) { bd = d; best = a.icao; }
+    }
+    if (e.target === cv) { S.sel = best; renderSide(); }
+  }
+  S.drag = null;
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  S.pxPerNm = Math.min(300, Math.max(.5,
+    S.pxPerNm * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
+}, { passive: false });
+window.addEventListener("keydown", e => {
+  if (e.key === "r" || e.key === "R") {
+    const c = S.data && centroid(S.data.aircraft);
+    if (c) S.center = c;
+  } else if (e.key === "s" || e.key === "S") S.sweep = !S.sweep;
+});
+for (const id of ["ant", "gain"])
+  document.getElementById(id).addEventListener("input",
+    () => { S.tunerTouched = true; });
+document.getElementById("apply").onclick = async () => {
+  const ant = document.getElementById("ant").value;
+  const g = document.getElementById("gain").value;
+  await fetch(`/set?antenna=${encodeURIComponent(ant)}&gain=${g}`);
+  S.tunerTouched = false;
+};
+</script>
+</body>
+</html>

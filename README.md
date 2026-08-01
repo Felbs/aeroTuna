@@ -25,6 +25,7 @@ git clone https://github.com/Felbs/aeroTuna.git
 cd aeroTuna
 python tools/adsb.py selftest            # proves the whole pipeline - no radio needed
 python tools/adsb.py capture --secs 20   # live 1090 MHz (needs an SDR, see below)
+python tools/aero_panel.py               # THE ATC SCOPE: http://127.0.0.1:8646
 ```
 **Dependencies:** `numpy`, `numba`, and the `SoapySDR` python bindings +
 a driver for your SDR. Easiest path on any OS is
@@ -37,13 +38,40 @@ on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soap
 | `python tools/adsb.py selftest` | No radio needed: CRC-24 against published Mode S test vectors, field decode, synthetic-IQ roundtrip, and a marginal-bit rescue proof. |
 | `python tools/adsb.py capture --secs 20` | Live 1090 MHz: demod → CRC gate → confidence rescue → plane table (ICAO, callsign, altitude, speed). |
 | `python tools/adsb.py shootout` | Antenna A/B/C compared by decoded-message count — pick your 1090 MHz antenna empirically, not by folklore. |
+| `python tools/aero_panel.py` | **The ATC scope**: a standing receiver + localhost radar display — blips, leader lines, trails, data blocks, flight strips. `--replay lab/x.cs16` runs it from a frozen capture, no radio needed. |
 
 Hot loops are numba-jitted; a 20 s capture analyzes in ~3 s.
 
-## Status (early)
+## The ATC scope
+`aero_panel.py` serves a dark radar scope on `http://127.0.0.1:8646`
+(localhost only — nothing leaves your machine, and no location is ever
+configured: the view centers itself on the traffic it decodes).
+
+Position comes from full **CPR decode**: local decode against each
+aircraft's own last fix, global even/odd pairing to bootstrap — with two
+honesty gates a naive decoder lacks:
+
+* **two-pairing confirmation** — one global pairing never plots; a single
+  miscorrected (rescued) frame can decode to a plausible fix hundreds of
+  nm out, so a fix needs two independent pairings agreeing within 20 nm;
+* **fleet-median range gate** — CPR boundary-straddle decodes
+  self-consistently but a whole latitude zone (6°) off; 1090 MHz is
+  line-of-sight (~240 nm), so bootstrap fixes >300 nm from the fleet
+  median are rejected as mis-zones.
+
+The panel wears its truth dials on screen: **delivery %** (samples
+actually delivered vs wall×fs — a short read is data loss, shown, never
+hidden), **rescued** (messages that exist only because of the confidence
+plane), and an SDR state chip that names who holds the radio instead of
+spinning silently.
+
+## Status
 - ✅ Demod + CRC + rescue validated (selftest) and proven live (17 aircraft first capture)
 - ✅ Antenna shootout working — measure, don't assume (our indoor rabbit ears beat two bigger antennas at 1090)
-- ⏳ Next: CPR position decode (lat/lon), live map, rescue-vs-dump1090 A/B harness, miscorrection audit on rescued frames
+- ✅ Confidence rescue beats blind flipping 1.33× at 0.0% hard-ghost rate on a frozen 480 MB corpus (`tools/rescue_ab.py`)
+- ✅ CPR position decode (global + local, mode-s.org known vectors in selftest) + velocity vectors (track, vertical rate)
+- ✅ Live ATC scope (`tools/aero_panel.py`)
+- ⏳ Next: miscorrection audit of rescued frames, dump1090 A/B harness, Mode S (DF4/5/20/21) altitude/ident replies
 
 ## Hardware
 Any SoapySDR-supported SDR (reference: SDRplay RSPdx) + any antenna — the

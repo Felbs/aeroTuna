@@ -16,6 +16,9 @@ Modes:
   capture    - N seconds of live 1090 MHz -> decode -> plane table
   shootout   - antenna A/B/C compared by DECODED MESSAGE COUNT (the dial)
 
+Fleet citizenship: capture paths acquire the one-radio radio_lock when the
+fleet's lock module is present (fleet_lock()) - never a bare open.
+
 Examples:
   python adsb.py selftest
   python adsb.py capture --secs 20 --antenna "Antenna B"
@@ -231,24 +234,120 @@ def decode_fields(bits):
         for k in range(8):
             cs += _CHARSET[_bf(bits, 40 + 6 * k, 46 + 6 * k)]
         info["callsign"] = cs.replace("#", "").strip()
-    elif 9 <= tc <= 18:                # airborne position: altitude (Q-bit)
-        q = int(bits[47])
-        if q:
-            n = (_bf(bits, 40, 47) << 4) | _bf(bits, 48, 52)
-            info["alt_ft"] = n * 25 - 1000
-    elif tc == 19:                     # velocity, subtype 1/2
+    elif 9 <= tc <= 18 or 20 <= tc <= 22:   # airborne position
+        if 9 <= tc <= 18:              # barometric altitude (Q-bit form)
+            q = int(bits[47])
+            if q:
+                n = (_bf(bits, 40, 47) << 4) | _bf(bits, 48, 52)
+                info["alt_ft"] = n * 25 - 1000
+        info["cpr_odd"] = int(bits[53])
+        info["lat_cpr"] = _bf(bits, 54, 71) / 131072.0
+        info["lon_cpr"] = _bf(bits, 71, 88) / 131072.0
+    elif tc == 19:                     # velocity
         st = _bf(bits, 37, 40)
-        if st in (1, 2):
-            vew = _bf(bits, 46, 56) - 1
-            vns = _bf(bits, 57, 67) - 1
-            if vew >= 0 and vns >= 0:
-                info["speed_kt"] = int(round(math.hypot(vew, vns)))
+        if st in (1, 2):               # ground speed (2 = supersonic, x4)
+            vew = _bf(bits, 46, 56)
+            vns = _bf(bits, 57, 67)
+            if vew and vns:
+                mul = 4 if st == 2 else 1
+                vx = (vew - 1) * mul * (-1 if bits[45] else 1)   # east +
+                vy = (vns - 1) * mul * (-1 if bits[56] else 1)   # north +
+                info["speed_kt"] = int(round(math.hypot(vx, vy)))
+                info["track_deg"] = (math.degrees(math.atan2(vx, vy))
+                                     + 360.0) % 360.0
+        elif st in (3, 4):             # airspeed + magnetic heading
+            if int(bits[45]):
+                info["track_deg"] = _bf(bits, 46, 56) * 360.0 / 1024.0
+            aspd = _bf(bits, 57, 67)
+            if aspd:
+                info["speed_kt"] = (aspd - 1) * (4 if st == 4 else 1)
+        vr = _bf(bits, 69, 78)
+        if vr:
+            info["vr_fpm"] = (vr - 1) * 64 * (-1 if bits[68] else 1)
     return info
+
+
+# ==========================================================================
+# CPR position decode (the v2 lever: lat/lon for the ATC scope)
+# ==========================================================================
+_NZ = 15
+
+
+def cpr_nl(lat):
+    """Number of longitude zones at a latitude (the standard NL function)."""
+    a = abs(lat)
+    if a >= 87.0:
+        return 1 if a > 87.0 else 2
+    x = 1.0 - math.cos(math.pi / (2.0 * _NZ))
+    c = math.cos(math.radians(lat)) ** 2
+    return int(math.floor(2.0 * math.pi / math.acos(1.0 - x / c)))
+
+
+def cpr_global(lat_e, lon_e, lat_o, lon_o, newest_odd):
+    """Unambiguous airborne position from an even/odd CPR pair (fields
+    already scaled to [0,1)). Returns (lat, lon) or None when the pair
+    straddles a latitude-zone boundary (caller waits for the next pair)."""
+    dlat_e, dlat_o = 360.0 / 60.0, 360.0 / 59.0
+    j = int(math.floor(59.0 * lat_e - 60.0 * lat_o + 0.5))
+    lat_ev = dlat_e * ((j % 60) + lat_e)
+    lat_od = dlat_o * ((j % 59) + lat_o)
+    if lat_ev >= 270.0:
+        lat_ev -= 360.0
+    if lat_od >= 270.0:
+        lat_od -= 360.0
+    if cpr_nl(lat_ev) != cpr_nl(lat_od):
+        return None
+    nl = cpr_nl(lat_od if newest_odd else lat_ev)
+    m = int(math.floor(lon_e * (nl - 1) - lon_o * nl + 0.5))
+    if newest_odd:
+        lat = lat_od
+        ni = max(nl - 1, 1)
+        lon = (360.0 / ni) * ((m % ni) + lon_o)
+    else:
+        lat = lat_ev
+        ni = max(nl, 1)
+        lon = (360.0 / ni) * ((m % ni) + lon_e)
+    if lon >= 180.0:
+        lon -= 360.0
+    if not -90.0 <= lat <= 90.0:
+        return None
+    return lat, lon
+
+
+def cpr_local(lat_cpr, lon_cpr, odd, ref_lat, ref_lon):
+    """Single-message decode near a known reference (< ~180 nm): the
+    aircraft's own last fix, once it has one."""
+    dlat = 360.0 / 59.0 if odd else 360.0 / 60.0
+    j = math.floor(ref_lat / dlat) + math.floor(
+        0.5 + (ref_lat % dlat) / dlat - lat_cpr)
+    lat = dlat * (j + lat_cpr)
+    nl = max(cpr_nl(lat) - (1 if odd else 0), 1)
+    dlon = 360.0 / nl
+    m = math.floor(ref_lon / dlon) + math.floor(
+        0.5 + (ref_lon % dlon) / dlon - lon_cpr)
+    lon = dlon * (m + lon_cpr)
+    return lat, lon
 
 
 # ==========================================================================
 # SDR capture
 # ==========================================================================
+def fleet_lock():
+    """Optional citizenship in the one-radio fleet lock: cooperate when the
+    lock module exists (a fresh clone has no fleet to collide with)."""
+    cands = [os.environ.get("RADIO_LOCK_PY", ""),
+             r"Z:\src\gr-radiotuna\tools\radio_lock.py"]
+    for c in cands:
+        if c and Path(c).is_file():
+            sys.path.insert(0, str(Path(c).parent))
+            try:
+                import radio_lock
+                return radio_lock
+            except Exception:
+                pass
+    return None
+
+
 def open_sdr(antenna, gain_db=45, fs=FS):
     import SoapySDR
     from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CS16
@@ -275,6 +374,24 @@ def open_sdr(antenna, gain_db=45, fs=FS):
 
 
 def capture_iq(secs, antenna, gain_db=45):
+    """One-shot capture. NEVER a bare open when a fleet lock exists:
+    priority 60 = user-driven run; abort loudly if outranked."""
+    rl = fleet_lock()
+    if rl:
+        if not rl.acquire("adsb_capture", "one-shot 1090 capture", 60,
+                          wait_s=15.0):
+            busy = rl.status() or {}
+            raise RuntimeError(
+                f"radio held by {busy.get('owner', '?')} "
+                f"(p{busy.get('priority', '?')}) - not opening over it")
+    try:
+        return _capture_iq_locked(secs, antenna, gain_db)
+    finally:
+        if rl:
+            rl.release("adsb_capture")
+
+
+def _capture_iq_locked(secs, antenna, gain_db=45):
     sdr, st = open_sdr(antenna, gain_db)
     n_want = int(secs * FS)
     buf = np.empty(2 * 65536, np.int16)
@@ -305,13 +422,26 @@ def analyze(iq, do_rescue=True):
                 if b2 is not None:
                     rescued.append({**f, "bits": b2, "flips": nf})
     planes = {}
-    for f in good + rescued:
+    for f in sorted(good + rescued, key=lambda f: f["start"]):
         d = decode_fields(f["bits"])
-        p = planes.setdefault(d["icao"], {"msgs": 0})
+        p = planes.setdefault(d["icao"], {"msgs": 0, "_cpr": {}})
         p["msgs"] += 1
-        for key in ("callsign", "alt_ft", "speed_kt"):
+        for key in ("callsign", "alt_ft", "speed_kt", "track_deg", "vr_fpm"):
             if key in d:
                 p[key] = d[key]
+        if "lat_cpr" in d:                      # pair even/odd within capture
+            t = f["start"] / FS
+            odd = d["cpr_odd"]
+            p["_cpr"][odd] = (d["lat_cpr"], d["lon_cpr"], t)
+            if 0 in p["_cpr"] and 1 in p["_cpr"]:
+                e, o = p["_cpr"][0], p["_cpr"][1]
+                if abs(e[2] - o[2]) <= 10.0:
+                    g = cpr_global(e[0], e[1], o[0], o[1],
+                                   newest_odd=o[2] > e[2])
+                    if g:
+                        p["lat"], p["lon"] = round(g[0], 5), round(g[1], 5)
+    for p in planes.values():
+        p.pop("_cpr", None)
     return {"candidates": len(frames), "crc_ok": len(good),
             "rescued": len(rescued), "planes": planes}
 
@@ -341,6 +471,29 @@ def cmd_selftest(args):
     print(f"    position vector -> icao={d2['icao']} alt={d2.get('alt_ft')} ft"
           f"  {'OK' if d2.get('alt_ft') == 38000 else 'FAIL'}")
     ok &= d2.get("alt_ft") == 38000
+    # 2b. CPR position: the mode-s.org even/odd pair with published truth
+    print("[2b] CPR global + local decode")
+    de = decode_fields(hex_to_bits("8D40621D58C382D690C8AC2863A7"))  # even
+    do = decode_fields(hex_to_bits("8D40621D58C386435CC412692AD6"))  # odd
+    g = cpr_global(de["lat_cpr"], de["lon_cpr"], do["lat_cpr"],
+                   do["lon_cpr"], newest_odd=False)
+    want = (52.2572021484375, 3.919372558593750)
+    hit = g is not None and abs(g[0] - want[0]) < 1e-6 \
+        and abs(g[1] - want[1]) < 1e-6
+    print(f"    global -> {g}  {'OK' if hit else 'FAIL'}")
+    ok &= hit
+    loc = cpr_local(de["lat_cpr"], de["lon_cpr"], de["cpr_odd"], 52.26, 3.92)
+    hit = abs(loc[0] - want[0]) < 1e-6 and abs(loc[1] - want[1]) < 1e-6
+    print(f"    local  -> ({loc[0]:.7f}, {loc[1]:.7f})  {'OK' if hit else 'FAIL'}")
+    ok &= hit
+    # 2c. velocity vector: the mode-s.org groundspeed vector (159 kt, 182.9 deg)
+    dv = decode_fields(hex_to_bits("8D485020994409940838175B284F"))
+    hit = dv.get("speed_kt") == 159 and abs(dv.get("track_deg", 0) - 182.88) < 0.1 \
+        and dv.get("vr_fpm") == -832
+    print(f"    velocity vector -> {dv.get('speed_kt')} kt / "
+          f"{dv.get('track_deg', 0):.1f} deg / {dv.get('vr_fpm')} fpm"
+          f"  {'OK' if hit else 'FAIL'}")
+    ok &= hit
     # 3. synthetic IQ roundtrip (+ noise), incl. confidence-guided rescue
     print("[3] synthetic IQ roundtrip")
     rng = np.random.default_rng(1)
