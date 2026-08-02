@@ -413,6 +413,7 @@ function draw(ts) {
     cv.width = w * dpr; cv.height = h * dpr;
   }
   cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (S.data && S.data.sdr.mode === "listen") { drawWaterfall(w, h); return; }
   if (S.view === "3D" && S.center) { draw3d(ts, w, h); return; }
   cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
   const cxp = w / 2, cyp = h / 2;
@@ -650,6 +651,8 @@ function renderSide() {
   const audrow = document.getElementById("audrow");
   const aud = document.getElementById("aud");
   audrow.style.display = d.sdr.mode === "listen" ? "block" : "none";
+  document.getElementById("hint").style.display =
+    d.sdr.mode === "listen" ? "none" : "block";
   document.getElementById("audhint").style.display =
     (d.sdr.mode === "listen" && aud.paused) ? "block" : "none";
   if (!S.tunerTouched) {
@@ -665,7 +668,94 @@ function renderSide() {
                          ? null : el.dataset.icao; renderSide(); };
 }
 
-/* ---------------- airband listen deck ---------------- */
+/* ---------------- airband waterfall (listen mode) ---------------- */
+const WF = { img: document.createElement("canvas"), last: 0,
+             center: 0, span: 2.083334, names: null };
+WF.img.width = 1024; WF.img.height = 150;
+const WFLUT = (() => {          /* phosphor colormap: navy->green->white */
+  const t = [];
+  for (let v = 0; v < 64; v++) {
+    const x = v / 63;
+    t.push([Math.round(10 + 200 * Math.max(0, x - 0.7) / 0.3),
+            Math.round(18 + 237 * Math.min(1, x * 1.6)),
+            Math.round(28 + 120 * Math.max(0, x - 0.5))]);
+  }
+  return t;
+})();
+async function pollWaterfall() {
+  if (!S.data || S.data.sdr.mode !== "listen") return;
+  try {
+    const r = await fetch(`/waterfall.json?since=${WF.last}`);
+    const d = await r.json();
+    WF.center = d.center_mhz; WF.span = d.span_mhz;
+    if (!d.rows.length) return;
+    const g = WF.img.getContext("2d");
+    g.drawImage(WF.img, 0, -d.rows.length);
+    for (let k = 0; k < d.rows.length; k++) {
+      const row = d.rows[k];
+      const im = g.createImageData(1024, 1);
+      for (let i = 0; i < 1024; i++) {
+        const c = WFLUT[Math.min(63, row.v[i])];
+        im.data[4 * i] = c[0]; im.data[4 * i + 1] = c[1];
+        im.data[4 * i + 2] = c[2]; im.data[4 * i + 3] = 255;
+      }
+      g.putImageData(im, 0, 150 - d.rows.length + k);
+      WF.last = row.id;
+    }
+  } catch (e) {}
+}
+setInterval(pollWaterfall, 1000);
+function wfFreqAt(x, w) {
+  return WF.center - WF.span / 2 + (x / w) * WF.span;
+}
+function drawWaterfall(w, h) {
+  cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
+  const plotH = h - 46;
+  cx2.imageSmoothingEnabled = false;
+  cx2.drawImage(WF.img, 0, 0, 1024, 150, 0, 24, w, plotH - 24);
+  cx2.imageSmoothingEnabled = true;
+  const font = "11px Consolas, monospace";
+  cx2.font = font;
+  /* frequency axis */
+  const f0 = WF.center - WF.span / 2, f1 = WF.center + WF.span / 2;
+  cx2.strokeStyle = "rgba(110,255,160,.25)";
+  cx2.fillStyle = "#6f8a7c";
+  const step = 0.2;
+  for (let f = Math.ceil(f0 / step) * step; f < f1; f += step) {
+    const x = (f - f0) / WF.span * w;
+    cx2.beginPath(); cx2.moveTo(x, plotH); cx2.lineTo(x, plotH + 5);
+    cx2.stroke();
+    cx2.fillText(f.toFixed(1), x - 14, plotH + 17);
+  }
+  /* named channels in view (airport DB) */
+  if (!WF.names && S.freqs) {
+    WF.names = [];
+    for (const ap in S.freqs)
+      for (const r of S.freqs[ap])
+        WF.names.push({ m: r.m, n: ap + " " + r.t });
+  }
+  if (WF.names) {
+    cx2.fillStyle = "rgba(140,190,255,.6)";
+    for (const c of WF.names) {
+      if (c.m < f0 || c.m > f1) continue;
+      const x = (c.m - f0) / WF.span * w;
+      cx2.fillText(c.n, x + 2, 14);
+      cx2.strokeStyle = "rgba(140,190,255,.25)";
+      cx2.beginPath(); cx2.moveTo(x, 18); cx2.lineTo(x, 24); cx2.stroke();
+    }
+  }
+  /* tuned channel cursor */
+  if (S.data && S.data.sdr.listen_mhz) {
+    const x = (S.data.sdr.listen_mhz - f0) / WF.span * w;
+    cx2.strokeStyle = "#ffc966";
+    cx2.beginPath(); cx2.moveTo(x, 18); cx2.lineTo(x, plotH); cx2.stroke();
+    cx2.fillStyle = "#ffc966";
+    cx2.fillText(S.data.sdr.listen_mhz.toFixed(3), x + 4, plotH - 6);
+  }
+  cx2.fillStyle = "#3d5348";
+  cx2.fillText("waterfall: newest at bottom · a bright vertical stripe = " +
+               "someone keyed up · CLICK a stripe to tune it", 10, h - 10);
+}
 async function listen(mhz) {
   const sqEl = document.getElementById("lsq");
   const sq = sqEl ? (parseFloat(sqEl.value) || 0) : 8;
@@ -791,6 +881,16 @@ function projAny(lat, lon) {
   return toXY(lat, lon);
 }
 window.addEventListener("mouseup", e => {
+  if (S.drag && !S.drag.moved && S.data
+      && S.data.sdr.mode === "listen" && e.target === cv) {
+    /* waterfall click-to-tune: snap to the 5 kHz raster */
+    const rect = cv.getBoundingClientRect();
+    const f = wfFreqAt(e.clientX - rect.left, cv.clientWidth);
+    const snapped = Math.round(f * 200) / 200;
+    if (snapped > 118 && snapped < 137) listen(snapped);
+    S.drag = null;
+    return;
+  }
   if (S.drag && !S.drag.moved && S.data && S.center && e.target === cv) {
     const rect = cv.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;

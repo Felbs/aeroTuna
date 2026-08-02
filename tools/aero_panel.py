@@ -292,6 +292,9 @@ class Receiver(threading.Thread):
         self.audio_seq = 0
         self.audio_lock = threading.Lock()
         self.scan = None                    # {"t", "results", "busy"}
+        self.wf = deque(maxlen=150)         # waterfall rows while listening
+        self.wf_id = 0
+        self._wf_win = np.hanning(4096).astype(np.float32)
 
     def now(self):
         """Tracker timebase: wall clock live, data time in replay (a 20x
@@ -462,6 +465,20 @@ class Receiver(threading.Thread):
                         with self.audio_lock:
                             self.audio_seq += 1
                             self.audio.append((self.audio_seq, pcm.tobytes()))
+                        # waterfall row: the whole 2 MHz around the channel,
+                        # free from the same block - a keyed-up transmitter
+                        # anywhere nearby paints a stripe you can click
+                        acc = np.zeros(4096)
+                        for k in range(3):
+                            seg = iq[k * 4096:(k + 1) * 4096]
+                            acc += np.abs(np.fft.fftshift(
+                                np.fft.fft(seg * self._wf_win))) ** 2
+                        db = 10.0 * np.log10(acc / 3 + 1e-12)
+                        db = db.reshape(1024, 4).max(axis=1)   # peak-pool
+                        floor = float(np.median(db))
+                        row = np.clip(db - floor, 0, 60).astype(np.uint8)
+                        self.wf_id += 1
+                        self.wf.append((self.wf_id, row.tobytes()))
                         self.last_block = time.time()
                         tail = np.zeros(0, np.complex64)
                         continue
@@ -721,6 +738,18 @@ def make_handler(tracker, rx):
             elif u.path == "/scan":
                 rx.pending["scan"] = True
                 self._send(200, '{"ok": true}')
+            elif u.path == "/waterfall.json":
+                q = parse_qs(u.query)
+                since = int(q.get("since", ["0"])[0])
+                rows = [{"id": i, "v": list(b)} for i, b in rx.wf
+                        if i > since]
+                # the tuned center sits OFFSET high inside the capture
+                # (we tune 200 kHz low); tell the client the true axis
+                center = (rx.listen_mhz or 0) \
+                    - AirbandDemod.OFFSET / 1e6
+                self._send(200, json.dumps(
+                    {"center_mhz": center, "span_mhz": FS / 1e6,
+                     "mode": rx.mode, "rows": rows[-40:]}))
             elif u.path == "/freqs.json":
                 fj = HERE / "airband_freqs.json"
                 self._send(200, fj.read_bytes() if fj.is_file() else b"{}")
