@@ -60,16 +60,17 @@ class Tracker:
         self.ac = {}
         self.blocks = deque(maxlen=240)     # (t, cand, ok, rescued) ~2 min
 
-    def update(self, frames_ok, frames_rescued, n_candidates, now):
+    def _entry(self, icao, now):
+        return self.ac.setdefault(icao, {
+            "icao": icao, "first": now, "msgs": 0, "rescued": 0,
+            "modes": 0, "cpr": {}, "trail": deque(maxlen=120)})
+
+    def update(self, frames_ok, frames_rescued, df11, ap, n_candidates, now):
         with self.lock:
-            self.blocks.append((now, n_candidates, len(frames_ok),
-                                len(frames_rescued)))
             for f, was_rescued in ([(f, False) for f in frames_ok]
                                    + [(f, True) for f in frames_rescued]):
                 d = adsb.decode_fields(f["bits"])
-                a = self.ac.setdefault(d["icao"], {
-                    "icao": d["icao"], "first": now, "msgs": 0, "rescued": 0,
-                    "cpr": {}, "trail": deque(maxlen=120)})
+                a = self._entry(d["icao"], now)
                 a["msgs"] += 1
                 a["rescued"] += int(was_rescued)
                 a["last"] = now
@@ -79,6 +80,32 @@ class Tracker:
                         a[k] = d[k]
                 if "lat_cpr" in d:
                     self._position(a, d, now)
+            # DF11 all-calls: non-ADS-B aircraft announce themselves here
+            n_modes = 0
+            for f in df11:
+                icao = f"{adsb._bf(f['bits'], 8, 32):06X}"
+                a = self._entry(icao, now)
+                a["msgs"] += 1
+                a["modes"] += 1
+                a["last"] = now
+                n_modes += 1
+            # DF4/5/20/21: parity-recovered address, whitelist-gated -
+            # a 24-bit match against thin air would invent ghost planes
+            for f in ap:
+                a = self.ac.get(f["addr"])
+                if a is None:
+                    continue
+                a["msgs"] += 1
+                a["modes"] += 1
+                a["last"] = now
+                n_modes += 1
+                for k, v in adsb.decode_modes_fields(
+                        f["bits"], f["df"]).items():
+                    if k == "alt_ft" and "lat" in a:
+                        continue        # ES altitude wins for ES aircraft
+                    a[k] = v
+            self.blocks.append((now, n_candidates, len(frames_ok),
+                                len(frames_rescued), n_modes))
             # prune the long-gone
             for icao in [k for k, a in self.ac.items()
                          if now - a["last"] > 300.0]:
@@ -143,17 +170,19 @@ class Tracker:
     def snapshot(self, now):
         with self.lock:
             cut = now - 60.0
-            cand = ok = resc = 0
-            for t, c, o, r in self.blocks:
+            cand = ok = resc = modes = 0
+            for t, c, o, r, m in self.blocks:
                 if t >= cut:
                     cand += c
                     ok += o
                     resc += r
+                    modes += m
             out = []
             for a in self.ac.values():
-                e = {k: a[k] for k in ("icao", "msgs", "rescued", "callsign",
-                                       "alt_ft", "speed_kt", "track_deg",
-                                       "vr_fpm", "lat", "lon") if k in a}
+                e = {k: a[k] for k in ("icao", "msgs", "rescued", "modes",
+                                       "callsign", "alt_ft", "speed_kt",
+                                       "track_deg", "vr_fpm", "squawk",
+                                       "lat", "lon") if k in a}
                 e["age"] = round(now - a["last"], 1)
                 if "pos_t" in a:
                     e["pos_age"] = round(now - a["pos_t"], 1)
@@ -164,8 +193,8 @@ class Tracker:
             out.sort(key=lambda e: e.pop("_first"))
             return {"aircraft": out,
                     "stats": {"cand_60": cand, "crc_ok_60": ok,
-                              "rescued_60": resc,
-                              "msg_min": (ok + resc),
+                              "rescued_60": resc, "modes_60": modes,
+                              "msg_min": (ok + resc + modes),
                               "aircraft": len(out),
                               "with_pos": sum(1 for e in out if "lat" in e)}}
 
@@ -201,9 +230,10 @@ class Receiver(threading.Thread):
     def _process(self, iq, now):
         self.last_block = time.time()
         frames = adsb.demod_frames(iq)
-        good = [f for f in frames if f["crc_ok"]]
+        es = [f for f in frames if f["kind"] == "es"]
+        good = [f for f in es if f["crc_ok"]]
         rescued = []
-        bad = [f for f in frames if not f["crc_ok"]]
+        bad = [f for f in es if not f["crc_ok"]]
         if len(bad) > MAX_RESCUE_PER_BLOCK:
             self.rescue_skipped += len(bad) - MAX_RESCUE_PER_BLOCK
             bad = bad[:MAX_RESCUE_PER_BLOCK]
@@ -211,7 +241,9 @@ class Receiver(threading.Thread):
             b2, nf = adsb.rescue(f["bits"], f["conf"])
             if b2 is not None:
                 rescued.append({**f, "bits": b2})
-        self.tracker.update(good, rescued, len(frames), now)
+        df11 = [f for f in frames if f["kind"] == "df11" and f["crc_ok"]]
+        ap = [f for f in frames if f["kind"] == "ap"]
+        self.tracker.update(good, rescued, df11, ap, len(frames), now)
 
     # ---- replay rail ----
     def _run_replay(self):

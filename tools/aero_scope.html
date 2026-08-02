@@ -49,7 +49,7 @@
   header h1 span { color: var(--phos); }
   header .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
   #tiles {
-    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 1px;
     background: var(--edge); border-bottom: 1px solid var(--edge);
   }
   .tile { background: var(--panel); padding: 8px 6px 7px; text-align: center; }
@@ -122,6 +122,7 @@
     <div class="tile"><div class="v" id="t_ac">&ndash;</div><div class="l">AIRCRAFT</div></div>
     <div class="tile"><div class="v" id="t_msg">&ndash;</div><div class="l">MSG/MIN</div></div>
     <div class="tile"><div class="v" id="t_resc">&ndash;</div><div class="l">RESCUED</div></div>
+    <div class="tile"><div class="v" id="t_modes">&ndash;</div><div class="l">MODE S</div></div>
     <div class="tile"><div class="v" id="t_del">&ndash;</div><div class="l">DELIVERY</div></div>
   </div>
   <div id="sdrline">
@@ -538,6 +539,9 @@ function fmtStrip(a) {
     ? String(Math.round(a.track_deg)).padStart(3, "0") + "&deg;" : "&mdash;";
   const oldc = a.age > 45 ? "old" : "";
   const nofix = a.lat == null;
+  const emerg = ["7500", "7600", "7700"].includes(a.squawk);
+  const sq = a.squawk
+    ? `<span title="squawk"><b>${a.squawk}</b></span>` : "";
   const pos = nofix ? "no position (waiting for CPR pair)"
     : `${a.lat.toFixed(4)}, ${a.lon.toFixed(4)} (${Math.round(a.pos_age)}s)`;
   const rp = a.msgs ? Math.round(100 * a.rescued / a.msgs) : 0;
@@ -552,13 +556,15 @@ function fmtStrip(a) {
   return `<div class="strip ${a.icao === S.sel ? "sel" : ""} ${nofix ? "nofix" : ""}"
        data-icao="${a.icao}">
     <div class="r1 ${oldc}"><span class="cs">${cs}</span>
-      ${nofix ? '<span class="tagnofix">NO FIX</span>' : ""}
+      ${emerg ? '<span class="tagnofix" style="color:var(--err)">EMERG</span>'
+              : nofix ? '<span class="tagnofix">NO FIX</span>' : ""}
       <span class="icao">${a.icao}</span></div>
     <div class="r2 ${oldc}"><span><b>${alt}</b>${vs}</span><span><b>${spd}</b></span>
-      <span><b>${trk}</b></span>
+      <span><b>${trk}</b></span>${sq}
       <span style="margin-left:auto">${Math.round(a.age)}s</span></div>
     <div class="ext">pos ${pos}${rxline}<br>
-      msgs ${a.msgs} &middot; rescued ${a.rescued} (${rp}%)</div>
+      msgs ${a.msgs} &middot; rescued ${a.rescued} (${rp}%)
+      &middot; mode-S ${a.modes || 0}</div>
   </div>`;
 }
 function renderSide() {
@@ -567,6 +573,7 @@ function renderSide() {
   document.getElementById("t_ac").textContent = st.aircraft;
   document.getElementById("t_msg").textContent = st.msg_min;
   document.getElementById("t_resc").textContent = st.rescued_60;
+  document.getElementById("t_modes").textContent = st.modes_60 ?? "–";
   const del = d.sdr.delivery;
   document.getElementById("t_del").textContent = del == null ? "–" : del + "%";
   const dot = document.getElementById("sdrdot");

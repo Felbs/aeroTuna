@@ -25,7 +25,7 @@ def run(files):
     for f in files:
         raw = np.fromfile(f, dtype=np.int16).astype(np.float32) / 32768.0
         iq = (raw[0::2] + 1j * raw[1::2]).astype(np.complex64)
-        fr = demod_frames(iq)
+        fr = [x for x in demod_frames(iq) if x.get("kind", "es") == "es"]
         frames_all.extend(fr)
         print(f"  {Path(f).name}: {len(fr)} DF17/18 candidates")
     clean = [f for f in frames_all if f["crc_ok"]]

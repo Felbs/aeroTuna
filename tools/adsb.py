@@ -139,8 +139,17 @@ def _scan_impl(mag, pre_hi, pre_lo, thresh_ratio, floor):
                 score += conf[nmsg, b]
             if ok and score > 0.0:
                 starts[nmsg] = i
+                df = (bits[nmsg, 0] << 4) | (bits[nmsg, 1] << 3) \
+                    | (bits[nmsg, 2] << 2) | (bits[nmsg, 3] << 1) \
+                    | bits[nmsg, 4]
                 nmsg += 1
-                i += 240            # skip past this frame
+                # short Mode S replies (DF 0/4/5/11) occupy 56 bits -
+                # skip only their footprint so a reply right behind
+                # them is not swallowed
+                if df == 0 or df == 4 or df == 5 or df == 11:
+                    i += 128
+                else:
+                    i += 240
                 continue
         i += 1
     return starts[:nmsg], bits[:nmsg], conf[:nmsg]
@@ -153,7 +162,15 @@ else:
 
 
 def demod_frames(iq, thresh_ratio=1.5):
-    """IQ (complex64 @ 2 MS/s) -> list of dicts with bits/conf/CRC status."""
+    """IQ (complex64 @ 2 MS/s) -> list of dicts with bits/conf/CRC status.
+
+    kinds: 'es'   DF17/18 extended squitter (112b, CRC-verifiable, rescuable)
+           'df11' all-call reply (56b; remainder 0 = acquisition squitter,
+                  ICAO carried in the clear)
+           'ap'   DF4/5/20/21 interrogation replies: parity is XORed with
+                  the ICAO address, so crc24() RECOVERS the address - it
+                  can only be trusted against a whitelist of aircraft
+                  already heard (the dump1090 approach). Never rescued."""
     mag = np.abs(iq).astype(np.float32)
     floor = 3.5 * float(np.median(mag))
     starts, bits, conf = _scan(mag, _PRE_HI, _PRE_LO, thresh_ratio, floor)
@@ -162,12 +179,65 @@ def demod_frames(iq, thresh_ratio=1.5):
         b = bits[k]
         df = (int(b[0]) << 4) | (int(b[1]) << 3) | (int(b[2]) << 2) \
             | (int(b[3]) << 1) | int(b[4])
-        if df not in (17, 18):      # extended squitter only (v1)
-            continue
-        rem = crc24(b)
-        out.append({"start": int(starts[k]), "df": df, "bits": b,
-                    "conf": conf[k], "crc_ok": rem == 0, "rem": rem})
+        if df in (17, 18):
+            rem = crc24(b)
+            out.append({"start": int(starts[k]), "df": df, "kind": "es",
+                        "bits": b, "conf": conf[k],
+                        "crc_ok": rem == 0, "rem": rem})
+        elif df == 11:
+            b56 = b[:56]
+            rem = crc24(b56)
+            out.append({"start": int(starts[k]), "df": 11, "kind": "df11",
+                        "bits": b56, "conf": conf[k][:56],
+                        "crc_ok": rem == 0, "rem": rem})
+        elif df in (4, 5, 20, 21):
+            n = 56 if df in (4, 5) else 112
+            bn = b[:n]
+            out.append({"start": int(starts[k]), "df": df, "kind": "ap",
+                        "bits": bn, "conf": conf[k][:n],
+                        "crc_ok": False, "addr": f"{crc24(bn):06X}"})
     return out
+
+
+# ==========================================================================
+# Mode S reply fields (DF4/5/20/21 + DF11)
+# ==========================================================================
+def ac13_alt(bits):
+    """13-bit altitude code at message bits 19..31 (DF4/DF20).
+    M(b7)=metric and Gillham (Q=0) forms return None (v1)."""
+    if int(bits[25]):                       # M: metric altitude
+        return None
+    if not int(bits[27]):                   # Q=0: 100 ft Gillham code
+        return None
+    n = (_bf(bits, 19, 25) << 5) | (int(bits[26]) << 4) | _bf(bits, 28, 32)
+    return n * 25 - 1000
+
+
+def id13_squawk(bits):
+    """13-bit identity code at message bits 19..31 (DF5/DF21) -> squawk."""
+    c1, a1, c2, a2, c4, a4, _x, b1, d1, b2, d2, b4, d4 = (
+        int(bits[19 + i]) for i in range(13))
+    return (f"{a4 * 4 + a2 * 2 + a1}{b4 * 4 + b2 * 2 + b1}"
+            f"{c4 * 4 + c2 * 2 + c1}{d4 * 4 + d2 * 2 + d1}")
+
+
+def decode_modes_fields(bits, df):
+    """Field decode for interrogation replies (whitelist-matched 'ap')."""
+    info = {}
+    if df in (4, 20):
+        alt = ac13_alt(bits)
+        if alt is not None and -1000 <= alt <= 60000:
+            info["alt_ft"] = alt
+    elif df in (5, 21):
+        info["squawk"] = id13_squawk(bits)
+    if df in (20, 21) and _bf(bits, 32, 40) == 0x20:   # Comm-B BDS 2,0
+        cs = ""
+        for k in range(8):
+            cs += _CHARSET[_bf(bits, 40 + 6 * k, 46 + 6 * k)]
+        cs = cs.replace("#", "").strip()
+        if cs and all(c.isalnum() or c == " " for c in cs):
+            info["callsign"] = cs
+    return info
 
 
 def rescue_blind(bits, max_flips=2):
@@ -413,10 +483,11 @@ def _capture_iq_locked(secs, antenna, gain_db=45):
 
 def analyze(iq, do_rescue=True):
     frames = demod_frames(iq)
-    good = [f for f in frames if f["crc_ok"]]
+    es = [f for f in frames if f["kind"] == "es"]
+    good = [f for f in es if f["crc_ok"]]
     rescued = []
     if do_rescue:
-        for f in frames:
+        for f in es:
             if not f["crc_ok"]:
                 b2, nf = rescue(f["bits"], f["conf"])
                 if b2 is not None:
@@ -440,10 +511,28 @@ def analyze(iq, do_rescue=True):
                                    newest_odd=o[2] > e[2])
                     if g:
                         p["lat"], p["lon"] = round(g[0], 5), round(g[1], 5)
+    # DF11 all-calls: aircraft announcing themselves outside ADS-B
+    n11 = 0
+    for f in (f for f in frames if f["kind"] == "df11" and f["crc_ok"]):
+        icao = f"{_bf(f['bits'], 8, 32):06X}"
+        planes.setdefault(icao, {"msgs": 0, "_cpr": {}})["msgs"] += 1
+        n11 += 1
+    # DF4/5/20/21: address recovered from parity, trusted only against
+    # aircraft already heard (whitelist) - never against thin air
+    n_ap = 0
+    for f in (f for f in frames if f["kind"] == "ap"):
+        p = planes.get(f["addr"])
+        if p is None:
+            continue
+        p["msgs"] += 1
+        n_ap += 1
+        for k, v in decode_modes_fields(f["bits"], f["df"]).items():
+            p.setdefault(k, v)
     for p in planes.values():
         p.pop("_cpr", None)
     return {"candidates": len(frames), "crc_ok": len(good),
-            "rescued": len(rescued), "planes": planes}
+            "rescued": len(rescued), "df11": n11, "modes_ap": n_ap,
+            "planes": planes}
 
 
 # ==========================================================================
@@ -492,6 +581,42 @@ def cmd_selftest(args):
         and dv.get("vr_fpm") == -832
     print(f"    velocity vector -> {dv.get('speed_kt')} kt / "
           f"{dv.get('track_deg', 0):.1f} deg / {dv.get('vr_fpm')} fpm"
+          f"  {'OK' if hit else 'FAIL'}")
+    ok &= hit
+    # 2d. Mode S replies: encoder/decoder roundtrips (machinery proof;
+    # live consistency vs ADS-B altitudes is the field check)
+    print("[2d] Mode S replies: DF11 / DF4 altitude / DF5 squawk")
+    icao_t = 0xA1B2C3
+
+    def _put(bb, a, b, val):
+        for i in range(b - a):
+            bb[a + i] = (val >> (b - a - 1 - i)) & 1
+    b11 = np.zeros(56, np.uint8)
+    _put(b11, 0, 5, 11)
+    _put(b11, 8, 32, icao_t)
+    _put(b11, 32, 56, crc24(b11))
+    hit = crc24(b11) == 0 and _bf(b11, 8, 32) == icao_t
+    print(f"    DF11 all-call: rem={crc24(b11)} icao={_bf(b11, 8, 32):06X}"
+          f"  {'OK' if hit else 'FAIL'}")
+    ok &= hit
+    b4 = np.zeros(56, np.uint8)
+    _put(b4, 0, 5, 4)
+    _put(b4, 19, 25, 48)                  # AC13 for 38000 ft (N=1560, Q=1)
+    b4[26] = 1
+    b4[27] = 1
+    _put(b4, 28, 32, 8)
+    _put(b4, 32, 56, crc24(b4) ^ icao_t)  # address-parity
+    hit = crc24(b4) == icao_t and ac13_alt(b4) == 38000
+    print(f"    DF4 reply: addr={crc24(b4):06X} alt={ac13_alt(b4)} ft"
+          f"  {'OK' if hit else 'FAIL'}")
+    ok &= hit
+    b5 = np.zeros(56, np.uint8)
+    _put(b5, 0, 5, 5)
+    for i, v in enumerate([0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]):
+        b5[19 + i] = v                    # squawk 7700
+    _put(b5, 32, 56, crc24(b5) ^ icao_t)
+    hit = crc24(b5) == icao_t and id13_squawk(b5) == "7700"
+    print(f"    DF5 reply: addr={crc24(b5):06X} squawk={id13_squawk(b5)}"
           f"  {'OK' if hit else 'FAIL'}")
     ok &= hit
     # 3. synthetic IQ roundtrip (+ noise), incl. confidence-guided rescue
