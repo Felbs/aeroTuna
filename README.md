@@ -108,7 +108,8 @@ ground stations.
 - ✅ Live ATC scope (`tools/aero_panel.py`)
 - ✅ Mode S replies (DF11 + whitelist-gated DF4/5/20/21), airband voice + mini waterfall + band scan, UAT 978 decoder (selftest-complete; live reception pending)
 - ✅ Miscorrection audit (`tools/miscorrect_audit.py`): confidence rescue repairs 42% more frames than blind flipping at a 1.6% field-mismatch rate (same failure class as blind); ghost-ICAO rate 3.5% → the panel requires 2 corroborating messages before an aircraft displays
-- ⏳ Next: dump1090 A/B referee live, NEXRAD FIS-B renderer (needs UAT reception), surface position (TC 5-8)
+- ✅ External referee (`tools/referee_pymodes.py`): pyModeS agrees with every decoded field on 279 native frames — zero mismatches (ICAO, callsign, altitude, speed, track, vertical rate)
+- ⏳ Next: NEXRAD FIS-B renderer (needs UAT reception), surface position (TC 5-8), dump1090 IQ-level A/B
 
 ## Hardware
 Any SoapySDR-supported SDR (reference: SDRplay RSPdx) + any antenna — the
