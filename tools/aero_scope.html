@@ -183,7 +183,11 @@
     <button id="qset" title="saved ONLY to lab/qth.json on this machine (gitignored) - never leaves, never pushed">SET RX</button>
   </div>
   <div id="listendeck"></div>
-  <audio id="aud" style="display:none"></audio>
+  <div id="audrow" style="display:none;padding:4px 14px 6px;border-bottom:1px solid var(--edge)">
+    <audio id="aud" controls style="width:100%;height:28px"></audio>
+    <div id="audhint" style="font-size:10px;color:var(--warn);display:none">
+      player paused &mdash; press &#9654; above to hear audio</div>
+  </div>
   <div id="strips"></div>
   <div id="empty" style="display:none">listening &hellip; no aircraft yet</div>
   <footer>rescued = messages that exist only because of the confidence
@@ -635,10 +639,19 @@ function renderSide() {
   document.getElementById("sdrdetail").textContent = d.sdr.detail || "";
   renderListenDeck(d);
   const lb = document.getElementById("lbanner");
-  if (d.sdr.mode === "listen") {
+  const scanBusy = d.sdr.scan && d.sdr.scan.busy;
+  if (scanBusy) {
+    lb.style.display = "block";
+    lb.textContent = "SCANNING THE AIRBAND — back in ~35 s";
+  } else if (d.sdr.mode === "listen") {
     lb.style.display = "block";
     lb.textContent = `LISTENING ${d.sdr.listen_mhz.toFixed(3)} MHz — scope paused`;
   } else lb.style.display = "none";
+  const audrow = document.getElementById("audrow");
+  const aud = document.getElementById("aud");
+  audrow.style.display = d.sdr.mode === "listen" ? "block" : "none";
+  document.getElementById("audhint").style.display =
+    (d.sdr.mode === "listen" && aud.paused) ? "block" : "none";
   if (!S.tunerTouched) {
     document.getElementById("ant").value = d.sdr.antenna;
     document.getElementById("gain").value = d.sdr.gain;
@@ -696,8 +709,25 @@ function renderListenDeck(d) {
     <input id="lsq" type="number" step="1" value="${S.lsq ?? 8}" style="width:40px"
       title="squelch dB over adjacent noise (0 = always open)"
       onchange="S.lsq=this.value">
-    <button onclick="listen(parseFloat(document.getElementById('lmhz').value)||121.5)">LISTEN</button>
+    <button onclick="const v=parseFloat(document.getElementById('lmhz').value);
+      if(!isNaN(v))listen(v)">LISTEN</button>
     <button onclick="listen(121.5)" title="emergency guard channel">GUARD 121.5</button></div>`;
+  /* the answer to "what is worth clicking": scan the whole band NOW */
+  const sc = d.sdr.scan;
+  h += `<div class="lrow"><button onclick="fetch('/scan')"
+      ${sc && sc.busy ? "disabled" : ""} style="margin-left:0">
+      ${sc && sc.busy ? "SCANNING 118–137 … (~35 s)" : "\u{1F4E1} SCAN BAND"}</button>
+    <span class="lnote" style="padding:0">${sc && !sc.busy && sc.results
+      ? "active " + Math.round((Date.now()/1000 - sc.t)/60) + " min ago" : ""}</span></div>`;
+  if (sc && !sc.busy && sc.results && sc.results.length) {
+    h += `<div class="lhead">ACTIVE NOW</div>`;
+    for (const r of sc.results.slice(0, 10))
+      h += `<div class="lrow"><b>${r.mhz.toFixed(3)}</b>
+        <span class="ld">+${r.db} dB</span>
+        <button onclick="listen(${r.mhz})">LISTEN</button></div>`;
+  } else if (sc && !sc.busy && sc.results && !sc.results.length) {
+    h += `<div class="lnote">scan found no active carriers</div>`;
+  }
   if (el.innerHTML !== h) {
     const focus = document.activeElement && document.activeElement.id;
     const val = focus === "lmhz" ? document.getElementById("lmhz").value : null;

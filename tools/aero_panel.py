@@ -266,10 +266,12 @@ class AirbandDemod:
 # ==========================================================================
 class Receiver(threading.Thread):
     def __init__(self, tracker, antenna, gain, replay=None, speed=1.0,
-                 use_lock=True):
+                 use_lock=True, listen_antenna=None):
         super().__init__(daemon=True)
         self.tracker = tracker
         self.antenna = antenna
+        self.scope_antenna = antenna
+        self.listen_antenna = listen_antenna or antenna
         self.gain = gain
         self.replay = replay
         self.speed = speed
@@ -289,6 +291,7 @@ class Receiver(threading.Thread):
         self.audio = deque(maxlen=40)       # (seq, pcm bytes) ~20 s
         self.audio_seq = 0
         self.audio_lock = threading.Lock()
+        self.scan = None                    # {"t", "results", "busy"}
 
     def now(self):
         """Tracker timebase: wall clock live, data time in replay (a 20x
@@ -434,7 +437,7 @@ class Receiver(threading.Thread):
             try:
                 while not self.shutdown:
                     if self.pending:
-                        self._apply_pending(sdr)
+                        self._apply_pending(sdr, st)
                     if self.rl:
                         if time.time() - last_hb > 5.0:
                             self.rl.heartbeat()
@@ -491,12 +494,86 @@ class Receiver(threading.Thread):
                 else:
                     time.sleep(10.0)
 
-    def _apply_pending(self, sdr):
+    def _do_scan(self, sdr, st):
+        """Airband activity sweep: hop 118-137 in 1.8 MHz windows, FFT
+        carrier census. ~35 s; answers 'what is worth clicking RIGHT NOW'.
+        Born of the 8/02 lesson: every hand-picked channel was quiet while
+        28 carriers boomed elsewhere in the band."""
+        from SoapySDR import SOAPY_SDR_RX
+        self.scan = {"busy": True, "t": time.time(), "results": []}
+        found = []
+        win = np.hanning(8192).astype(np.float32)
+        try:                                 # sweep on the airband antenna
+            sdr.setAntenna(SOAPY_SDR_RX, 0, self.listen_antenna)
+        except Exception:
+            pass
+        for cf in np.arange(119.0, 137.0, 1.8):
+            sdr.setFrequency(SOAPY_SDR_RX, 0, cf * 1e6)
+            if self.rl:
+                self.rl.heartbeat()
+            try:
+                iq, _ = self._read_block(sdr, st, int(1.5 * FS),
+                                         max_stall_s=10.0)
+            except RuntimeError:
+                continue
+            self.last_block = time.time()   # scan is alive, not wedged
+            iq = iq[int(0.3 * FS):]         # settle
+            nseg = len(iq) // 8192
+            psd = np.zeros(8192)
+            for k in range(nseg):
+                psd += np.abs(np.fft.fftshift(
+                    np.fft.fft(iq[k * 8192:(k + 1) * 8192] * win))) ** 2
+            db = 10 * np.log10(psd / max(nseg, 1) + 1e-12)
+            floor = float(np.median(db))
+            freqs = cf + (np.arange(8192) - 4096) * (FS / 8192) / 1e6
+            hot = np.where(db > floor + 8)[0]
+            i = 0
+            while i < len(hot):
+                j = i
+                while j + 1 < len(hot) and hot[j + 1] - hot[j] <= 4:
+                    j += 1
+                pk = hot[i:j + 1][np.argmax(db[hot[i:j + 1]])]
+                fmhz = float(freqs[pk])
+                if 118.0 < fmhz < 136.99 and abs(fmhz - cf) > 0.02:
+                    found.append((round(fmhz, 3),
+                                  round(float(db[pk] - floor), 1)))
+                i = j + 1
+        found.sort(key=lambda t: -t[1])
+        seen = set()
+        results = []
+        for f, s in found:
+            k = round(f * 40) / 40          # dedup to 25 kHz raster
+            if k not in seen:
+                seen.add(k)
+                results.append({"mhz": f, "db": s})
+        self.scan = {"busy": False, "t": time.time(),
+                     "results": results[:20]}
+        # restore whatever we were doing (antenna AND frequency)
+        if self.mode == "listen" and self.listen_mhz:
+            sdr.setFrequency(SOAPY_SDR_RX, 0,
+                             self.listen_mhz * 1e6 - AirbandDemod.OFFSET)
+        else:
+            try:
+                sdr.setAntenna(SOAPY_SDR_RX, 0, self.scope_antenna)
+                self.antenna = sdr.getAntenna(SOAPY_SDR_RX, 0)
+            except Exception:
+                pass
+            sdr.setFrequency(SOAPY_SDR_RX, 0, adsb.FREQ)
+
+    def _apply_pending(self, sdr, st=None):
         from SoapySDR import SOAPY_SDR_RX
         p, self.pending = self.pending, {}
         try:
+            if "scan" in p and st is not None:
+                self._do_scan(sdr, st)
             if "listen" in p:               # airband voice: retune, same fs
                 mhz = float(p["listen"])
+                if self.listen_antenna != self.antenna:
+                    try:                     # VHF wants the wideband port
+                        sdr.setAntenna(SOAPY_SDR_RX, 0, self.listen_antenna)
+                        self.antenna = sdr.getAntenna(SOAPY_SDR_RX, 0)
+                    except Exception:
+                        pass
                 sdr.setFrequency(SOAPY_SDR_RX, 0,
                                  mhz * 1e6 - AirbandDemod.OFFSET)
                 self.demod = AirbandDemod()
@@ -510,6 +587,12 @@ class Receiver(threading.Thread):
             elif "squelch" in p and self.demod:
                 self.demod.sq_db = float(p["squelch"])
             if "scope" in p:                # back to 1090 ADS-B
+                if self.scope_antenna != self.antenna:
+                    try:
+                        sdr.setAntenna(SOAPY_SDR_RX, 0, self.scope_antenna)
+                        self.antenna = sdr.getAntenna(SOAPY_SDR_RX, 0)
+                    except Exception:
+                        pass
                 sdr.setFrequency(SOAPY_SDR_RX, 0, adsb.FREQ)
                 self.mode = "scope"
                 self.listen_mhz = None
@@ -517,6 +600,10 @@ class Receiver(threading.Thread):
                 sdr.setAntenna(SOAPY_SDR_RX, 0, p["antenna"])
                 got = sdr.getAntenna(SOAPY_SDR_RX, 0)
                 self.antenna = got            # readback = the truth
+                if self.mode == "listen":     # selector edits current mode's
+                    self.listen_antenna = got
+                else:
+                    self.scope_antenna = got
                 self.detail = "" if got == p["antenna"] \
                     else f"antenna readback '{got}'"
             if "gain" in p:
@@ -553,7 +640,7 @@ class Receiver(threading.Thread):
                 "antenna": self.antenna, "gain": self.gain,
                 "lock": bool(self.rl),
                 "mode": self.mode, "listen_mhz": self.listen_mhz,
-                "listen_snr": self.listen_snr,
+                "listen_snr": self.listen_snr, "scan": self.scan,
                 "rescue_skipped": self.rescue_skipped,
                 "delivery": round(100.0 * sum(d) / len(d), 1) if d else None}
 
@@ -631,6 +718,9 @@ def make_handler(tracker, rx):
                     if "sq" in q:
                         rx.pending["squelch"] = q["sq"][0]
                     self._send(200, '{"ok": true}')
+            elif u.path == "/scan":
+                rx.pending["scan"] = True
+                self._send(200, '{"ok": true}')
             elif u.path == "/freqs.json":
                 fj = HERE / "airband_freqs.json"
                 self._send(200, fj.read_bytes() if fj.is_file() else b"{}")
@@ -698,11 +788,15 @@ def main():
                     help="replay pacing (2 = twice real time)")
     ap.add_argument("--no-lock", action="store_true",
                     help="skip fleet radio_lock even if present")
+    ap.add_argument("--listen-antenna", default=None,
+                    help="antenna for airband voice (default: same as scope;"
+                         " a wideband/discone port usually wins at VHF)")
     args = ap.parse_args()
 
     tracker = Tracker()
     rx = Receiver(tracker, args.antenna, args.gain, replay=args.replay,
-                  speed=args.speed, use_lock=not args.no_lock)
+                  speed=args.speed, use_lock=not args.no_lock,
+                  listen_antenna=args.listen_antenna)
     rx.start()
     srv = ThreadingHTTPServer(("127.0.0.1", args.port),
                               make_handler(tracker, rx))
