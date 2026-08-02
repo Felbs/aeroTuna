@@ -324,6 +324,7 @@ function renderSide() {
   const map = { RUNNING: "var(--ok)", REPLAY: "var(--ok)",
                 BUSY: "var(--warn)", YIELDED: "var(--warn)",
                 STARTING: "var(--warn)", STALLED: "var(--err)",
+                WEDGED: "var(--err)",
                 ERROR: "var(--err)", STOPPED: "var(--err)" };
   dot.style.background = map[d.sdr.state] || "var(--muted)";
   stEl.textContent = d.sdr.state;

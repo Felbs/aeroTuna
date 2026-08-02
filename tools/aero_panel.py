@@ -189,6 +189,7 @@ class Receiver(threading.Thread):
         self.rescue_skipped = 0
         self.pending = {}                   # antenna/gain changes from UI
         self.shutdown = False
+        self.last_block = None              # wedge watchdog timestamp
         self._clock = time.time()           # replay runs on STREAM time
 
     def now(self):
@@ -198,6 +199,7 @@ class Receiver(threading.Thread):
 
     # ---- shared block processing ----
     def _process(self, iq, now):
+        self.last_block = time.time()
         frames = adsb.demod_frames(iq)
         good = [f for f in frames if f["crc_ok"]]
         rescued = []
@@ -384,7 +386,20 @@ class Receiver(threading.Thread):
 
     def status(self):
         d = self.delivery
-        return {"state": self.state, "detail": self.detail,
+        state, detail = self.state, self.detail
+        # Wedge watchdog (8/01, seen live the first night): readStream can
+        # hang at the C level inside the SDRplay driver - no Python stall
+        # guard fires, the thread freezes mid-call, and "RUNNING" becomes a
+        # lie. The panel can't unstick C, but it must never lie: no block
+        # for 30 s while claiming RUNNING = WEDGED on the dial, with the
+        # recovery ladder in the detail.
+        if state == "RUNNING" and self.last_block \
+                and time.time() - self.last_block > 30.0:
+            state = "WEDGED"
+            detail = (f"no samples for {time.time() - self.last_block:.0f}s "
+                      "- driver hung: restart panel; if it repeats, "
+                      "Restart-Service SDRplayAPIService, then USB replug")
+        return {"state": state, "detail": detail,
                 "antenna": self.antenna, "gain": self.gain,
                 "lock": bool(self.rl),
                 "rescue_skipped": self.rescue_skipped,
@@ -455,16 +470,22 @@ def main():
     rx.start()
     srv = ThreadingHTTPServer(("127.0.0.1", args.port),
                               make_handler(tracker, rx))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
     mode = f"REPLAY {args.replay}" if args.replay else \
         f"LIVE {args.antenna} (lock={'on' if rx.rl else 'off'})"
     print(f"[aero_panel] ATC scope on http://127.0.0.1:{args.port}  [{mode}]")
+    # The panel LIVES AND DIES with its receiver: a stop-file (or crash)
+    # must take the whole process down, not leave a zombie HTTP server
+    # squatting the port serving stale state (8/02: two panels double-
+    # bound 8646 via SO_REUSEADDR - the zombie answered half the polls).
     try:
-        srv.serve_forever()
+        while rx.is_alive():
+            rx.join(timeout=1.0)
     except KeyboardInterrupt:
-        pass
-    finally:
         rx.shutdown = True
         rx.join(timeout=10.0)
+    finally:
+        srv.shutdown()
 
 
 if __name__ == "__main__":
