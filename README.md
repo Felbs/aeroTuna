@@ -65,14 +65,23 @@ hidden), **rescued** (messages that exist only because of the confidence
 plane), and an SDR state chip that names who holds the radio instead of
 spinning silently.
 
+**Two views:** the classic top-down scope, and a **3D perspective view**
+(`V` key or the sidebar button) — orbit, pan and zoom a Google-Earth-style
+camera around your receiver, aircraft drawn at (exaggerated) altitude on
+stems above the map, dependency-free canvas projection. `[` `]` adjust the
+altitude exaggeration.
+
 **Basemap, offline by design:** coastlines, state borders and ~5,300
 airports ship in the repo (`tools/basemap.json`, Natural Earth +
 OurAirports, both public domain) and render under the scope — press
 `M` to toggle. No tile servers, no network: your view of the sky never
 leaves your machine. To pin the scope on your receiver ("RX" marker +
 range/bearing per aircraft), drop a `lab/qth.json` with
-`{"lat": ..., "lon": ...}` — `lab/` is gitignored, so your position
-stays local by construction.
+`{"lat": ..., "lon": ...}` or use the **SET RX** fields in the sidebar —
+either way it's written only to `lab/qth.json`, and `lab/` is gitignored,
+so your position stays local by construction. Without it the scope
+estimates your position from the traffic itself (hollow "RX est" marker —
+decent, but biased tens of nm toward a directional antenna's beam).
 
 ## Status
 - ✅ Demod + CRC + rescue validated (selftest) and proven live (17 aircraft first capture)

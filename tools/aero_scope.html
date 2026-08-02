@@ -69,13 +69,19 @@
     display: flex; gap: 6px; padding: 8px 14px;
     border-bottom: 1px solid var(--edge); align-items: center;
   }
-  #tuner select, #tuner input, #tuner button {
+  #tuner select, #tuner input, #tuner button,
+  #posrow input, #posrow button {
     background: var(--bg); color: var(--ink); border: 1px solid var(--edge);
     font: inherit; font-size: 11px; padding: 3px 6px;
   }
   #tuner input { width: 52px; }
-  #tuner button { cursor: pointer; color: var(--phos); border-color: var(--faint); }
-  #tuner button:hover { border-color: var(--phos); }
+  #tuner button, #posrow button {
+    cursor: pointer; color: var(--phos); border-color: var(--faint); }
+  #tuner button:hover, #posrow button:hover { border-color: var(--phos); }
+  #posrow {
+    display: flex; gap: 6px; padding: 0 14px 8px; align-items: center;
+    border-bottom: 1px solid var(--edge);
+  }
   #strips { flex: 1; overflow-y: auto; }
   .strip {
     padding: 6px 14px 5px; border-bottom: 1px solid var(--edge);
@@ -129,6 +135,14 @@
     </select>
     <input id="gain" type="number" min="20" max="59" step="1" title="gain dB">
     <button id="apply">APPLY</button>
+    <button id="viewbtn" onclick="toggleView()" style="margin-left:auto">3D VIEW</button>
+  </div>
+  <div id="posrow">
+    <input id="qlat" type="number" step="0.0001" placeholder="lat"
+           style="width:86px" title="receiver latitude">
+    <input id="qlon" type="number" step="0.0001" placeholder="lon"
+           style="width:86px" title="receiver longitude">
+    <button id="qset" title="saved ONLY to lab/qth.json on this machine (gitignored) - never leaves, never pushed">SET RX</button>
   </div>
   <div id="strips"></div>
   <div id="empty" style="display:none">listening &hellip; no aircraft yet</div>
@@ -146,6 +160,10 @@ const S = {
   sel: null, sweep: true, sweepA: 0,
   drag: null, tunerTouched: false,
   map: null, showMap: true, qth: null,
+  view: localStorage.aero_view || "2D",
+  cam: { yaw: -0.5, pitch: 0.95, dist: 90 },   // 3D orbit camera
+  altEx: 4,                                     // altitude exaggeration
+  _c: null,
 };
 fetch("/basemap.json").then(r => r.json()).then(m => { S.map = m; })
   .catch(() => {});
@@ -174,6 +192,167 @@ function centroid(list) {
           p.reduce((s, a) => s + a.lon, 0) / p.length];
 }
 
+/* ---------------- 3D projection (orbit camera, no deps) ----------------
+   world: x east / y north / z up, nm, relative to S.center target.
+   camera orbits target at (yaw, pitch, dist); verified frames:
+   depth = y1*cos p - Z*sin p + d,  up = y1*sin p + Z*cos p          */
+function camFrame() {
+  S._c = { cy: Math.cos(S.cam.yaw), sy: Math.sin(S.cam.yaw),
+           cp: Math.cos(S.cam.pitch), sp: Math.sin(S.cam.pitch),
+           f0: cv.clientHeight * 1.2 };
+}
+function proj3(lat, lon, altFt) {
+  const [la0, lo0] = S.center;
+  const X = (lon - lo0) * 60 * Math.cos(la0 * Math.PI / 180);
+  const Y = (lat - la0) * 60;
+  const Z = (altFt || 0) / 6076 * S.altEx;
+  const c = S._c;
+  const x1 = X * c.cy - Y * c.sy;
+  const y1 = X * c.sy + Y * c.cy;
+  const depth = y1 * c.cp - Z * c.sp + S.cam.dist;
+  if (depth < 1.0) return null;
+  const f = c.f0 / depth;
+  return [cv.clientWidth / 2 + x1 * f,
+          cv.clientHeight / 2 - (y1 * c.sp + Z * c.cp) * f, depth];
+}
+function polyline3(pts, altFt) {
+  let pen = false;
+  cx2.beginPath();
+  for (const [lon, lat] of pts) {
+    const p = proj3(lat, lon, altFt);
+    if (!p) { pen = false; continue; }
+    if (pen) cx2.lineTo(p[0], p[1]); else { cx2.moveTo(p[0], p[1]); pen = true; }
+  }
+  cx2.stroke();
+}
+
+function draw3d(ts, w, h) {
+  camFrame();
+  /* panoramic sky: deep zenith into a phosphor-teal horizon glow */
+  const sky = cx2.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, "#020409");
+  sky.addColorStop(0.55, "#04121a");
+  sky.addColorStop(1, "#0a2a26");
+  cx2.fillStyle = sky; cx2.fillRect(0, 0, w, h);
+  const font = "11px Consolas, monospace";
+  cx2.font = font;
+  const dtNet = (performance.now() - S.fetchedAt) / 1000;
+  const span = Math.min(6, S.cam.dist / 60 * 3);        // deg of interest
+
+  /* ground: basemap + rings around the target */
+  if (S.showMap && S.map) {
+    const [la0, lo0] = S.center;
+    cx2.strokeStyle = "rgba(120,170,150,.25)"; cx2.lineWidth = 1;
+    for (const line of S.map.lines) {
+      const [lon0, lat0] = line[0];
+      if (Math.abs(lat0 - la0) > span + 6 && Math.abs(lon0 - lo0) > span + 8)
+        continue;
+      polyline3(line, 0);
+    }
+    const showM = S.cam.dist < 120;
+    for (const a of S.map.airports) {
+      if (Math.abs(a.la - la0) > span || Math.abs(a.lo - lo0) > span) continue;
+      if (a.t === "M" && !showM) continue;
+      const p = proj3(a.la, a.lo, 0);
+      if (!p || p[0] < -20 || p[0] > w + 20 || p[1] < -20 || p[1] > h + 20)
+        continue;
+      cx2.strokeStyle = "rgba(140,190,255,.5)";
+      cx2.beginPath();
+      cx2.moveTo(p[0] - 4, p[1] + 3); cx2.lineTo(p[0], p[1] - 4);
+      cx2.lineTo(p[0] + 4, p[1] + 3); cx2.closePath(); cx2.stroke();
+      cx2.fillStyle = "rgba(140,190,255,.5)";
+      cx2.fillText(a.c, p[0] + 6, p[1] + 4);
+    }
+  }
+  cx2.strokeStyle = "rgba(110,255,160,.14)";
+  const step = S.cam.dist < 40 ? 5 : S.cam.dist < 120 ? 10 : 25;
+  const [la0, lo0] = S.center;
+  const kx = 60 * Math.cos(la0 * Math.PI / 180);
+  for (let r = step; r <= step * 5; r += step) {
+    const ring = [];
+    for (let a = 0; a <= 360; a += 10)
+      ring.push([lo0 + r * Math.sin(a * Math.PI / 180) / kx,
+                 la0 + r * Math.cos(a * Math.PI / 180) / 60]);
+    polyline3(ring, 0);
+    const lp = proj3(la0 + r / 60, lo0, 0);
+    if (lp) { cx2.fillStyle = "#3d5348"; cx2.fillText(r + " nm", lp[0] + 3, lp[1] - 3); }
+  }
+
+  /* RX / target marker */
+  const anchor = S.qth ? [S.qth.lat, S.qth.lon] : null;
+  if (anchor) {
+    const p = proj3(anchor[0], anchor[1], 0);
+    if (p) {
+      cx2.strokeStyle = "#ffc966";
+      cx2.beginPath(); cx2.arc(p[0], p[1], 6, 0, 7); cx2.stroke();
+      cx2.beginPath();
+      cx2.moveTo(p[0] - 10, p[1]); cx2.lineTo(p[0] + 10, p[1]);
+      cx2.moveTo(p[0], p[1] - 10); cx2.lineTo(p[0], p[1] + 10); cx2.stroke();
+      cx2.fillStyle = "#ffc966"; cx2.fillText("RX", p[0] + 9, p[1] - 6);
+    }
+  }
+
+  /* aircraft lollipops, painter-sorted far -> near */
+  if (!S.data) return;
+  const items = [];
+  for (const a of S.data.aircraft) {
+    if (a.lat == null) continue;
+    const age = a.age + dtNet;
+    if (age > 120) continue;
+    const [lat, lon] = reckon(a, (a.pos_age || 0) + dtNet);
+    const top = proj3(lat, lon, a.alt_ft || 0);
+    if (!top) continue;
+    items.push({ a, lat, lon, top, age });
+  }
+  items.sort((p, q) => q.top[2] - p.top[2]);
+  for (const it of items) {
+    const { a, lat, lon, top } = it;
+    const sel = a.icao === S.sel;
+    const alpha = (it.age < 15 ? 1 : it.age < 45 ? .6 : .35)
+                  * Math.min(1, 140 / top[2]);
+    const g = proj3(lat, lon, 0);
+    const col = sel ? "#ffffff" : `rgba(92,255,157,${alpha})`;
+    if (g) {                                     /* shadow + stem */
+      cx2.fillStyle = `rgba(0,0,0,${0.45 * alpha})`;
+      cx2.beginPath(); cx2.ellipse(g[0], g[1], 4, 1.6, 0, 0, 7); cx2.fill();
+      cx2.strokeStyle = `rgba(92,255,157,${alpha * .45})`;
+      cx2.beginPath(); cx2.moveTo(g[0], g[1]); cx2.lineTo(top[0], top[1]);
+      cx2.stroke();
+    }
+    if (a.trail && a.trail.length > 1) {         /* trail at altitude */
+      cx2.strokeStyle = `rgba(92,255,157,${alpha * .3})`;
+      polyline3(a.trail.map(t => [t[1], t[0]]), a.alt_ft || 0);
+    }
+    if (a.speed_kt != null && a.track_deg != null) {   /* leader */
+      const d = a.speed_kt / 60, tr = a.track_deg * Math.PI / 180;
+      const p2 = proj3(lat + d * Math.cos(tr) / 60,
+                       lon + d * Math.sin(tr) /
+                       (60 * Math.cos(lat * Math.PI / 180)), a.alt_ft || 0);
+      if (p2) {
+        cx2.strokeStyle = col;
+        cx2.beginPath(); cx2.moveTo(top[0], top[1]);
+        cx2.lineTo(p2[0], p2[1]); cx2.stroke();
+      }
+    }
+    cx2.strokeStyle = col; cx2.lineWidth = sel ? 2 : 1.2;
+    cx2.strokeRect(top[0] - 4, top[1] - 4, 8, 8);
+    cx2.lineWidth = 1;
+    const cs = a.callsign || a.icao;
+    const alt = a.alt_ft != null
+      ? (a.alt_ft >= 18000 ? "FL" + Math.round(a.alt_ft / 100) : a.alt_ft + "ft")
+      : "---";
+    cx2.fillStyle = sel ? "#ffffff" : `rgba(214,232,220,${alpha})`;
+    cx2.fillText(cs, top[0] + 10, top[1] - 2);
+    cx2.fillStyle = sel ? "#ffffff" : `rgba(111,138,124,${Math.max(alpha, .4)})`;
+    cx2.fillText(alt + (a.speed_kt != null ? " " + a.speed_kt + "kt" : ""),
+                 top[0] + 10, top[1] + 11);
+  }
+  cx2.fillStyle = "#3d5348";
+  cx2.fillText(`3D · alt x${S.altEx} ([ ] adjust) · drag orbit · ` +
+               `shift-drag pan · wheel dist ${Math.round(S.cam.dist)} nm`,
+               10, h - 26);
+}
+
 /* ---------------- render ---------------- */
 function ringStep() {
   const view = Math.min(cv.clientWidth, cv.clientHeight) / 2 / S.pxPerNm;
@@ -187,6 +366,7 @@ function draw(ts) {
     cv.width = w * dpr; cv.height = h * dpr;
   }
   cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (S.view === "3D" && S.center) { draw3d(ts, w, h); return; }
   cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
   const cxp = w / 2, cyp = h / 2;
   const font = "11px Consolas, monospace";
@@ -223,7 +403,9 @@ function draw(ts) {
       cx2.fillStyle = "rgba(140,190,255,.55)";
       cx2.fillText(a.c, x + 6, y + 4);
     }
-    /* RX marker: you are here */
+    /* RX marker: you are here (solid = qth.json; hollow dashed = the
+       beacon-derived estimate - traffic centroid, biased by a
+       directional antenna, tens of nm of slop) */
     if (S.qth) {
       const [x, y] = toXY(S.qth.lat, S.qth.lon);
       cx2.strokeStyle = "#ffc966";
@@ -234,6 +416,17 @@ function draw(ts) {
       cx2.stroke();
       cx2.fillStyle = "#ffc966";
       cx2.fillText("RX", x + 9, y - 6);
+    } else if (S.data) {
+      const c = centroid(S.data.aircraft);
+      if (c) {
+        const [x, y] = toXY(c[0], c[1]);
+        cx2.strokeStyle = "rgba(255,201,102,.6)";
+        cx2.setLineDash([3, 3]);
+        cx2.beginPath(); cx2.arc(x, y, 7, 0, 7); cx2.stroke();
+        cx2.setLineDash([]);
+        cx2.fillStyle = "rgba(255,201,102,.6)";
+        cx2.fillText("RX est", x + 10, y - 6);
+      }
     }
   }
 
@@ -433,6 +626,20 @@ window.addEventListener("mousemove", e => {
   if (Math.abs(dx) + Math.abs(dy) > 3) S.drag.moved = true;
   S.drag.x = e.clientX; S.drag.y = e.clientY;
   const [la0] = S.center;
+  if (S.view === "3D") {
+    if (e.shiftKey) {                     /* pan the target on the ground */
+      const s = S.cam.dist / 600;
+      const cy = Math.cos(S.cam.yaw), sy = Math.sin(S.cam.yaw);
+      const dE = -dx * s * cy - dy * s * sy;
+      const dN = dx * s * sy - dy * s * cy;
+      S.center = [S.center[0] - dN / 60,
+                  S.center[1] - dE / (60 * Math.cos(la0 * Math.PI / 180))];
+    } else {                              /* orbit */
+      S.cam.yaw += dx * 0.008;
+      S.cam.pitch = Math.min(1.45, Math.max(0.12, S.cam.pitch + dy * 0.006));
+    }
+    return;
+  }
   S.center = [S.center[0] + dy / S.pxPerNm / 60,
               S.center[1] - dx / S.pxPerNm / 60 / Math.cos(la0 * Math.PI / 180)];
 });
@@ -454,6 +661,11 @@ window.addEventListener("mouseup", e => {
 });
 cv.addEventListener("wheel", e => {
   e.preventDefault();
+  if (S.view === "3D") {
+    S.cam.dist = Math.min(600, Math.max(5,
+      S.cam.dist * (e.deltaY < 0 ? 1 / 1.2 : 1.2)));
+    return;
+  }
   S.pxPerNm = Math.min(300, Math.max(.5,
     S.pxPerNm * (e.deltaY < 0 ? 1.2 : 1 / 1.2)));
 }, { passive: false });
@@ -464,7 +676,16 @@ window.addEventListener("keydown", e => {
     if (c) S.center = c;
   } else if (e.key === "s" || e.key === "S") S.sweep = !S.sweep;
   else if (e.key === "m" || e.key === "M") S.showMap = !S.showMap;
+  else if (e.key === "v" || e.key === "V") toggleView();
+  else if (e.key === "[") S.altEx = Math.max(1, S.altEx - 1);
+  else if (e.key === "]") S.altEx = Math.min(8, S.altEx + 1);
 });
+function toggleView() {
+  S.view = S.view === "3D" ? "2D" : "3D";
+  localStorage.aero_view = S.view;
+  document.getElementById("viewbtn").textContent =
+    S.view === "3D" ? "2D SCOPE" : "3D VIEW";
+}
 for (const id of ["ant", "gain"])
   document.getElementById(id).addEventListener("input",
     () => { S.tunerTouched = true; });
@@ -473,6 +694,21 @@ document.getElementById("apply").onclick = async () => {
   const g = document.getElementById("gain").value;
   await fetch(`/set?antenna=${encodeURIComponent(ant)}&gain=${g}`);
   S.tunerTouched = false;
+};
+document.getElementById("viewbtn").textContent =
+  S.view === "3D" ? "2D SCOPE" : "3D VIEW";
+document.getElementById("qset").onclick = async () => {
+  const lat = parseFloat(document.getElementById("qlat").value);
+  const lon = parseFloat(document.getElementById("qlon").value);
+  if (isNaN(lat) || isNaN(lon)) return;
+  const r = await fetch("/set_qth", { method: "POST",
+    body: JSON.stringify({ lat, lon }) });
+  if ((await r.json()).ok) {
+    S.qth = { lat, lon };
+    S.center = [lat, lon];
+    document.getElementById("qlat").value = "";
+    document.getElementById("qlon").value = "";
+  }
 };
 </script>
 </body>

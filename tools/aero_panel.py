@@ -293,6 +293,15 @@ class Receiver(threading.Thread):
         n_blk = int(BLOCK_S * FS)
         stalls = 0
         while not self.shutdown:
+            if self.rl and self.rl.stop_requested(OWNER):
+                # honor the stop-file in EVERY loop, not just mid-stream:
+                # the ERROR/BUSY cycles used to eat it via clear_stop on
+                # each re-acquire, making graceful stop impossible there
+                self.rl.clear_stop(OWNER)
+                self.rl.release(OWNER)
+                self.state = "STOPPED"
+                self.detail = "stop-file honored"
+                return
             if self.rl:
                 if not self.rl.acquire(OWNER, "live ATC scope", 80,
                                        wait_s=5.0):
@@ -306,11 +315,16 @@ class Receiver(threading.Thread):
             try:
                 sdr, st = self._open()
             except Exception as e:
-                if self.rl:
-                    self.rl.release(OWNER)
+                # HOLD the lock through open retries. Releasing here is a
+                # LIVELOCK against politely-parking consumers: the TV
+                # panel's sweeper needs ~2 s to see our lock and free the
+                # device, but by its next look the lock was gone again -
+                # "no available RSP devices" forever (first live night).
                 self.state = "ERROR"
-                self.detail = f"SDR open failed: {e}"
-                time.sleep(30.0)
+                self.detail = f"SDR open failed: {e} - lock held, retrying"
+                if self.rl:
+                    self.rl.heartbeat()
+                time.sleep(15.0)
                 continue
             self.state = "RUNNING"
             self.detail = ""
@@ -353,11 +367,19 @@ class Receiver(threading.Thread):
                 time.sleep(20.0)
             elif self.state == "STALLED":
                 if stalls >= 3:
+                    # A standing scope OUTLIVES a wedged radio: report
+                    # ERROR honestly and keep retrying on a slow cadence
+                    # (first live night: exiting here killed the panel
+                    # while the API was merely mid-recovery).
                     self.state = "ERROR"
-                    self.detail = ("stream stalled 3x - SDR likely wedged "
-                                   "(replug / Restart-Service ladder)")
-                    return
-                time.sleep(10.0)
+                    self.detail = ("stream stalled 3x - SDR wedged? "
+                                   "retrying every 60s (ladder: "
+                                   "Restart-Service SDRplayAPIService, "
+                                   "then USB replug)")
+                    stalls = 0
+                    time.sleep(60.0)
+                else:
+                    time.sleep(10.0)
 
     def _apply_pending(self, sdr):
         from SoapySDR import SOAPY_SDR_RX
@@ -462,6 +484,26 @@ def make_handler(tracker, rx):
                     rx.pending["antenna"] = q["antenna"][0]
                 if "gain" in q:
                     rx.pending["gain"] = q["gain"][0]
+                self._send(200, '{"ok": true}')
+            else:
+                self._send(404, "not found", "text/plain")
+
+        def do_POST(self):
+            if self.path == "/set_qth":
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    q = json.loads(self.rfile.read(n))
+                    lat, lon = float(q["lat"]), float(q["lon"])
+                    assert -90 <= lat <= 90 and -180 <= lon <= 180
+                except Exception:
+                    self._send(400, '{"ok": false}')
+                    return
+                # lab/ is gitignored: the position lives on THIS machine
+                # only and is served only to 127.0.0.1
+                lab = HERE.parent / "lab"
+                lab.mkdir(exist_ok=True)
+                (lab / "qth.json").write_text(
+                    json.dumps({"lat": lat, "lon": lon}))
                 self._send(200, '{"ok": true}')
             else:
                 self._send(404, "not found", "text/plain")
