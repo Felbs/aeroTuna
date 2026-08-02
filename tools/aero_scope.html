@@ -732,6 +732,32 @@ function drawMiniWaterfall() {
     g.fillText(S.data.sdr.listen_mhz.toFixed(3), Math.min(x + 3, w - 46), 8);
   }
 }
+function chanInfo(mhz) {
+  /* who owns this channel: a known airport facility (tower family) or
+     en-route/unknown (mostly aircraft + centers). One channel carries
+     BOTH sides of its conversation - the icon names the channel's owner,
+     not who keyed up. */
+  if (!S.freqs) return null;
+  if (!S.chanIdx) {
+    S.chanIdx = new Map();
+    for (const ap in S.freqs)
+      for (const r of S.freqs[ap]) {
+        const k = Math.round(r.m * 40);      /* 25 kHz buckets */
+        if (!S.chanIdx.has(k)) S.chanIdx.set(k, []);
+        S.chanIdx.get(k).push({ ap, t: r.t });
+      }
+  }
+  const k = Math.round(mhz * 40);
+  for (const kk of [k, k - 1, k + 1]) {
+    const v = S.chanIdx.get(kk);
+    if (v) return v[0];
+  }
+  return null;
+}
+function chanTag(mhz) {
+  const ci = chanInfo(mhz);
+  return ci ? `\u{1F5FC} ${ci.ap} ${ci.t}` : "✈ en-route";
+}
 async function listen(mhz) {
   const sqEl = document.getElementById("lsq");
   const sq = sqEl ? (parseFloat(sqEl.value) || 0) : 8;
@@ -753,6 +779,7 @@ function renderListenDeck(d) {
     const w = Math.min(60, Math.max(0, (snr || 0) * 3));
     h += `<div class="lrow now">
       <span>&#x1F50A; ${d.sdr.listen_mhz.toFixed(3)}</span>
+      <span class="ld">${chanTag(d.sdr.listen_mhz)}</span>
       <span class="snrbar"><i style="width:${w}px"></i></span>
       <span class="lsnr">${snr != null ? snr + " dB" : ""}</span>
       <button onclick="stopListen()">STOP &rarr; SCOPE</button></div>
@@ -782,14 +809,18 @@ function renderListenDeck(d) {
   const sc = d.sdr.scan;
   h += `<div class="lrow"><button onclick="fetch('/scan')"
       ${sc && sc.busy ? "disabled" : ""} style="margin-left:0">
-      ${sc && sc.busy ? "SCANNING 118–137 … (~35 s)" : "\u{1F4E1} SCAN BAND"}</button>
+      ${sc && sc.busy ? (sc.waiting ? "queued — waiting for the radio"
+                                    : "SCANNING 118–137 … (~35 s)")
+                      : "\u{1F4E1} SCAN BAND"}</button>
     <span class="lnote" style="padding:0">${sc && !sc.busy && sc.results
       ? "active " + Math.round((Date.now()/1000 - sc.t)/60) + " min ago" : ""}</span></div>`;
   if (sc && !sc.busy && sc.results && sc.results.length) {
-    h += `<div class="lhead">ACTIVE NOW</div>`;
+    h += `<div class="lhead">ACTIVE NOW &nbsp;
+      <span style="color:var(--faint);letter-spacing:0">
+      \u{1F5FC} airport facility &middot; ✈ en-route</span></div>`;
     for (const r of sc.results.slice(0, 10))
       h += `<div class="lrow"><b>${r.mhz.toFixed(3)}</b>
-        <span class="ld">+${r.db} dB</span>
+        <span class="ld">${chanTag(r.mhz)} &middot; +${r.db} dB</span>
         <button onclick="listen(${r.mhz})">LISTEN</button></div>`;
   } else if (sc && !sc.busy && sc.results && !sc.results.length) {
     h += `<div class="lnote">scan found no active carriers</div>`;
