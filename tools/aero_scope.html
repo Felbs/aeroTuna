@@ -82,6 +82,39 @@
     display: flex; gap: 6px; padding: 0 14px 8px; align-items: center;
     border-bottom: 1px solid var(--edge);
   }
+  #listendeck { border-bottom: 1px solid var(--edge); }
+  #listendeck .lrow {
+    display: flex; gap: 6px; align-items: center; padding: 4px 14px;
+    font-size: 11px; color: var(--muted);
+  }
+  #listendeck .lrow b { color: var(--ink); font-weight: 400; }
+  #listendeck .lrow.now { color: var(--ink); }
+  #listendeck button {
+    background: var(--bg); color: var(--phos); border: 1px solid var(--faint);
+    font: inherit; font-size: 10px; padding: 2px 6px; cursor: pointer;
+    margin-left: auto;
+  }
+  #listendeck button:hover { border-color: var(--phos); }
+  #listendeck input {
+    background: var(--bg); color: var(--ink); border: 1px solid var(--edge);
+    font: inherit; font-size: 11px; padding: 2px 6px;
+  }
+  #listendeck .lhead {
+    padding: 6px 14px 2px; font-size: 11px; color: var(--ink);
+    letter-spacing: .08em; display: flex; justify-content: space-between;
+  }
+  #listendeck .lx { cursor: pointer; color: var(--muted); }
+  #listendeck .lt { color: var(--faint); width: 52px; flex-shrink: 0;
+    text-transform: uppercase; font-size: 9px; }
+  #listendeck .ld { overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; flex: 1; }
+  #listendeck .lnote { padding: 2px 14px 6px; font-size: 10px;
+    color: var(--faint); }
+  #listendeck .snrbar { display: inline-block; width: 60px; height: 7px;
+    border: 1px solid var(--edge); }
+  #listendeck .snrbar i { display: block; height: 100%;
+    background: var(--phos); }
+  #listendeck .lsnr { font-size: 10px; width: 44px; }
   #strips { flex: 1; overflow-y: auto; }
   .strip {
     padding: 6px 14px 5px; border-bottom: 1px solid var(--edge);
@@ -110,6 +143,10 @@
 <div id="scopewrap">
   <canvas id="scope"></canvas>
   <div id="offline">PANEL OFFLINE</div>
+  <div id="lbanner" style="position:absolute;top:12px;left:50%;
+    transform:translateX(-50%);background:var(--panel);
+    border:1px solid var(--warn);color:var(--warn);padding:4px 14px;
+    display:none;letter-spacing:.1em"></div>
   <div id="hint">drag pan &middot; wheel zoom &middot; R recenter &middot;
     S sweep &middot; M map &middot; click blip/strip select</div>
 </div>
@@ -145,6 +182,8 @@
            style="width:86px" title="receiver longitude">
     <button id="qset" title="saved ONLY to lab/qth.json on this machine (gitignored) - never leaves, never pushed">SET RX</button>
   </div>
+  <div id="listendeck"></div>
+  <audio id="aud" style="display:none"></audio>
   <div id="strips"></div>
   <div id="empty" style="display:none">listening &hellip; no aircraft yet</div>
   <footer>rescued = messages that exist only because of the confidence
@@ -168,6 +207,9 @@ const S = {
 };
 fetch("/basemap.json").then(r => r.json()).then(m => { S.map = m; })
   .catch(() => {});
+fetch("/freqs.json").then(r => r.json()).then(f => { S.freqs = f; })
+  .catch(() => {});
+S.freqs = null; S.apSel = null;
 
 /* ---------------- geometry ---------------- */
 function toXY(lat, lon) {           // nm east/north of center -> canvas px
@@ -587,9 +629,16 @@ function renderSide() {
   stEl.textContent = d.sdr.state;
   stEl.style.color = map[d.sdr.state] || "var(--muted)";
   document.getElementById("sdrant").textContent =
-    `${d.sdr.antenna} · ${d.sdr.gain} dB` +
-    (d.sdr.lock ? " · lock" : "");
+    d.sdr.mode === "listen"
+      ? `LISTEN ${d.sdr.listen_mhz.toFixed(3)} MHz`
+      : `${d.sdr.antenna} · ${d.sdr.gain} dB` + (d.sdr.lock ? " · lock" : "");
   document.getElementById("sdrdetail").textContent = d.sdr.detail || "";
+  renderListenDeck(d);
+  const lb = document.getElementById("lbanner");
+  if (d.sdr.mode === "listen") {
+    lb.style.display = "block";
+    lb.textContent = `LISTENING ${d.sdr.listen_mhz.toFixed(3)} MHz — scope paused`;
+  } else lb.style.display = "none";
   if (!S.tunerTouched) {
     document.getElementById("ant").value = d.sdr.antenna;
     document.getElementById("gain").value = d.sdr.gain;
@@ -601,6 +650,63 @@ function renderSide() {
   for (const el of box.querySelectorAll(".strip"))
     el.onclick = () => { S.sel = S.sel === el.dataset.icao
                          ? null : el.dataset.icao; renderSide(); };
+}
+
+/* ---------------- airband listen deck ---------------- */
+async function listen(mhz) {
+  const sqEl = document.getElementById("lsq");
+  const sq = sqEl ? (parseFloat(sqEl.value) || 0) : 8;
+  await fetch(`/listen?mhz=${mhz}&sq=${sq}`);
+  const aud = document.getElementById("aud");
+  aud.src = "/audio.wav?" + Date.now();
+  aud.play().catch(() => {});
+}
+async function stopListen() {
+  await fetch("/listen?stop=1");
+  const aud = document.getElementById("aud");
+  aud.pause(); aud.removeAttribute("src"); aud.load();
+}
+function renderListenDeck(d) {
+  const el = document.getElementById("listendeck");
+  let h = "";
+  if (d.sdr.mode === "listen") {
+    const snr = d.sdr.listen_snr;
+    const w = Math.min(60, Math.max(0, (snr || 0) * 3));
+    h += `<div class="lrow now">
+      <span>&#x1F50A; ${d.sdr.listen_mhz.toFixed(3)}</span>
+      <span class="snrbar"><i style="width:${w}px"></i></span>
+      <span class="lsnr">${snr != null ? snr + " dB" : ""}</span>
+      <button onclick="stopListen()">STOP &rarr; SCOPE</button></div>
+    <div class="lnote">scope paused while listening &middot; squelch opens
+      at +6 dB</div>`;
+  }
+  if (S.apSel && S.freqs) {
+    const rows = S.freqs[S.apSel];
+    h += `<div class="lhead">${S.apSel} frequencies
+      <span onclick="S.apSel=null;renderSide()" class="lx">&times;</span></div>`;
+    if (rows) {
+      for (const f of rows)
+        h += `<div class="lrow"><span class="lt">${f.t}</span>
+          <span class="ld">${f.d}</span><b>${f.m.toFixed(3)}</b>
+          <button onclick="listen(${f.m})">LISTEN</button></div>`;
+    } else h += `<div class="lnote">no published airband frequencies</div>`;
+  }
+  h += `<div class="lrow"><input id="lmhz" type="number" step="0.005"
+      placeholder="MHz" style="width:70px">
+    <input id="lsq" type="number" step="1" value="${S.lsq ?? 8}" style="width:40px"
+      title="squelch dB over adjacent noise (0 = always open)"
+      onchange="S.lsq=this.value">
+    <button onclick="listen(parseFloat(document.getElementById('lmhz').value)||121.5)">LISTEN</button>
+    <button onclick="listen(121.5)" title="emergency guard channel">GUARD 121.5</button></div>`;
+  if (el.innerHTML !== h) {
+    const focus = document.activeElement && document.activeElement.id;
+    const val = focus === "lmhz" ? document.getElementById("lmhz").value : null;
+    el.innerHTML = h;
+    if (val !== null) {
+      const i = document.getElementById("lmhz");
+      i.value = val; i.focus();
+    }
+  }
 }
 
 /* ---------------- polling ---------------- */
@@ -650,19 +756,38 @@ window.addEventListener("mousemove", e => {
   S.center = [S.center[0] + dy / S.pxPerNm / 60,
               S.center[1] - dx / S.pxPerNm / 60 / Math.cos(la0 * Math.PI / 180)];
 });
+function projAny(lat, lon) {
+  if (S.view === "3D") { const p = proj3(lat, lon, 0); return p && [p[0], p[1]]; }
+  return toXY(lat, lon);
+}
 window.addEventListener("mouseup", e => {
-  if (S.drag && !S.drag.moved && S.data && S.center) {
-    /* click-select nearest blip within 18 px */
+  if (S.drag && !S.drag.moved && S.data && S.center && e.target === cv) {
     const rect = cv.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    /* aircraft first, then airports (click an airport = its radio stack) */
     let best = null, bd = 18;
     for (const a of S.data.aircraft) {
       if (a.lat == null) continue;
-      const [x, y] = toXY(a.lat, a.lon);
-      const d = Math.hypot(x - mx, y - my);
+      const p = projAny(a.lat, a.lon);
+      if (!p) continue;
+      const d = Math.hypot(p[0] - mx, p[1] - my);
       if (d < bd) { bd = d; best = a.icao; }
     }
-    if (e.target === cv) { S.sel = best; renderSide(); }
+    if (best) { S.sel = best; renderSide(); S.drag = null; return; }
+    let bap = null; bd = 14;
+    if (S.map && S.showMap) {
+      const [la0, lo0] = S.center;
+      for (const a of S.map.airports) {
+        if (Math.abs(a.la - la0) > 6 || Math.abs(a.lo - lo0) > 8) continue;
+        const p = projAny(a.la, a.lo);
+        if (!p) continue;
+        const d = Math.hypot(p[0] - mx, p[1] - my);
+        if (d < bd) { bd = d; bap = a.c; }
+      }
+    }
+    S.sel = null;
+    S.apSel = bap;
+    renderSide();
   }
   S.drag = null;
 });

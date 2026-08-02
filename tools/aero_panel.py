@@ -200,6 +200,68 @@ class Tracker:
 
 
 # ==========================================================================
+# airband AM voice (118-137 MHz: pilots, towers, ATIS)
+# ==========================================================================
+class AirbandDemod:
+    """2 MS/s IQ (tuned OFFSET low, classic DC-spike dodge) -> 20 kHz mono
+    PCM. Envelope AM with a min-tracking squelch floor: ATIS loops hold the
+    channel open; an idle tower squelches to silence between calls."""
+    RATE = 20000
+    OFFSET = 200_000.0
+
+    def __init__(self):
+        def lp(ntaps, cut, fs):
+            n = np.arange(ntaps) - (ntaps - 1) / 2
+            h = np.sinc(2 * cut / fs * n) * np.hanning(ntaps)
+            return (h / h.sum()).astype(np.float32)
+        self.t1 = lp(101, 80e3, 2e6)       # decim 10 -> 200 kS/s
+        self.t2 = lp(101, 3.5e3, 200e3)    # decim 10 -> 20 kS/s; airband
+                                           # voice is <3 kHz - every extra
+                                           # kHz of BW is pure noise
+        self.z1 = np.zeros(100, np.complex64)
+        self.z2 = np.zeros(100, np.complex64)
+        self.n0 = 0                         # mixer phase (period 10 exact)
+        self.agc = 1.0
+        self.sq_db = 8.0                    # squelch threshold (UI-settable)
+        self._win = np.hanning(4096).astype(np.float32)
+
+    def _stage(self, x, taps, z, r):
+        buf = np.concatenate([z, x])
+        return (np.convolve(buf, taps, "valid")[::r].astype(np.complex64),
+                buf[-(len(taps) - 1):])
+
+    def process(self, iq):
+        n = np.arange(self.n0, self.n0 + len(iq))
+        self.n0 = (self.n0 + len(iq)) % 10
+        x = iq * np.exp(-2j * np.pi * 0.1 * n).astype(np.complex64)
+        x1, self.z1 = self._stage(x, self.t1, self.z1, 10)
+        x, self.z2 = self._stage(x1, self.t2, self.z2, 10)
+        # SNR vs the ADJACENT spectrum, not vs the channel's own history:
+        # an always-on ATIS never shows a carrier-off floor on-channel
+        # (first squelch design read a strong broadcast as 0 dB forever).
+        # Stage-1 gives +-100 kHz: channel = |f|<8 kHz, noise = 30-80 kHz.
+        spec = np.abs(np.fft.fftshift(
+            np.fft.fft(x1[:4096] * self._win))) ** 2
+        fbin = 200e3 / 4096
+        mid = 2048
+        chan = spec[mid - int(5e3 / fbin): mid + int(5e3 / fbin)].sum()
+        lo_a, hi_a = int(30e3 / fbin), int(80e3 / fbin)
+        adj = np.concatenate([spec[mid - hi_a: mid - lo_a],
+                              spec[mid + lo_a: mid + hi_a]])
+        noise = float(np.median(adj)) * (10e3 / fbin)
+        snr_db = 10.0 * math.log10(max(chan, 1e-12) / max(noise, 1e-12))
+        env = np.abs(x)
+        audio = env - float(env.mean())
+        if snr_db < self.sq_db:             # squelch closed
+            audio[:] = 0.0
+        else:
+            rms = float(np.sqrt((audio ** 2).mean())) or 1e-6
+            self.agc = 0.9 * self.agc + 0.1 * min(0.25 / rms, 60.0)
+            audio = np.clip(audio * self.agc, -0.95, 0.95)
+        return (audio * 32767).astype(np.int16), round(snr_db, 1)
+
+
+# ==========================================================================
 # receiver (live SDR or corpus replay)
 # ==========================================================================
 class Receiver(threading.Thread):
@@ -220,6 +282,13 @@ class Receiver(threading.Thread):
         self.shutdown = False
         self.last_block = None              # wedge watchdog timestamp
         self._clock = time.time()           # replay runs on STREAM time
+        self.mode = "scope"                 # scope (1090) | listen (airband)
+        self.listen_mhz = None
+        self.listen_snr = None
+        self.demod = None
+        self.audio = deque(maxlen=40)       # (seq, pcm bytes) ~20 s
+        self.audio_seq = 0
+        self.audio_lock = threading.Lock()
 
     def now(self):
         """Tracker timebase: wall clock live, data time in replay (a 20x
@@ -384,6 +453,15 @@ class Receiver(threading.Thread):
                     iq, frac = self._read_block(sdr, st, n_blk)
                     self.delivery.append(frac)
                     stalls = 0
+                    if self.mode == "listen":
+                        pcm, snr = self.demod.process(iq)
+                        self.listen_snr = snr
+                        with self.audio_lock:
+                            self.audio_seq += 1
+                            self.audio.append((self.audio_seq, pcm.tobytes()))
+                        self.last_block = time.time()
+                        tail = np.zeros(0, np.complex64)
+                        continue
                     blk = np.concatenate([tail, iq]) if len(tail) else iq
                     self._process(blk, time.time())
                     tail = iq[-300:].copy()
@@ -417,6 +495,24 @@ class Receiver(threading.Thread):
         from SoapySDR import SOAPY_SDR_RX
         p, self.pending = self.pending, {}
         try:
+            if "listen" in p:               # airband voice: retune, same fs
+                mhz = float(p["listen"])
+                sdr.setFrequency(SOAPY_SDR_RX, 0,
+                                 mhz * 1e6 - AirbandDemod.OFFSET)
+                self.demod = AirbandDemod()
+                if "squelch" in p:
+                    self.demod.sq_db = float(p["squelch"])
+                with self.audio_lock:
+                    self.audio.clear()
+                self.mode = "listen"
+                self.listen_mhz = mhz
+                self.listen_snr = None
+            elif "squelch" in p and self.demod:
+                self.demod.sq_db = float(p["squelch"])
+            if "scope" in p:                # back to 1090 ADS-B
+                sdr.setFrequency(SOAPY_SDR_RX, 0, adsb.FREQ)
+                self.mode = "scope"
+                self.listen_mhz = None
             if "antenna" in p:
                 sdr.setAntenna(SOAPY_SDR_RX, 0, p["antenna"])
                 got = sdr.getAntenna(SOAPY_SDR_RX, 0)
@@ -456,6 +552,8 @@ class Receiver(threading.Thread):
         return {"state": state, "detail": detail,
                 "antenna": self.antenna, "gain": self.gain,
                 "lock": bool(self.rl),
+                "mode": self.mode, "listen_mhz": self.listen_mhz,
+                "listen_snr": self.listen_snr,
                 "rescue_skipped": self.rescue_skipped,
                 "delivery": round(100.0 * sum(d) / len(d), 1) if d else None}
 
@@ -517,6 +615,51 @@ def make_handler(tracker, rx):
                 if "gain" in q:
                     rx.pending["gain"] = q["gain"][0]
                 self._send(200, '{"ok": true}')
+            elif u.path == "/listen":
+                q = parse_qs(u.query)
+                if "stop" in q:
+                    rx.pending["scope"] = True
+                    self._send(200, '{"ok": true}')
+                else:
+                    try:
+                        mhz = float(q["mhz"][0])
+                        assert 108.0 <= mhz <= 137.0     # airband only
+                    except Exception:
+                        self._send(400, '{"ok": false}')
+                        return
+                    rx.pending["listen"] = mhz
+                    if "sq" in q:
+                        rx.pending["squelch"] = q["sq"][0]
+                    self._send(200, '{"ok": true}')
+            elif u.path == "/freqs.json":
+                fj = HERE / "airband_freqs.json"
+                self._send(200, fj.read_bytes() if fj.is_file() else b"{}")
+            elif u.path == "/audio.wav":
+                import struct
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                rate = 20000
+                self.wfile.write(
+                    b"RIFF" + struct.pack("<I", 0x7FFFFFF0) + b"WAVE"
+                    + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate,
+                                            rate * 2, 2, 16)
+                    + b"data" + struct.pack("<I", 0x7FFFFFC8))
+                seen = rx.audio_seq
+                try:
+                    while rx.mode == "listen" and not rx.shutdown:
+                        with rx.audio_lock:
+                            fresh = [c for s, c in rx.audio if s > seen]
+                            if fresh:
+                                seen = rx.audio[-1][0]
+                        for c in fresh:
+                            self.wfile.write(c)
+                        if fresh:
+                            self.wfile.flush()
+                        time.sleep(0.05)
+                except (BrokenPipeError, ConnectionError, OSError):
+                    pass
             else:
                 self._send(404, "not found", "text/plain")
 

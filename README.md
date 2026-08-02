@@ -83,6 +83,21 @@ so your position stays local by construction. Without it the scope
 estimates your position from the traffic itself (hollow "RX est" marker —
 decent, but biased tens of nm toward a directional antenna's beam).
 
+## Listen to the sky (airband voice)
+The scope doubles as an **airband receiver**: click any airport on the
+map and its real published frequencies appear (tower, ground, approach,
+ATIS — 14,000+ channels for 4,200 airports, embedded from OurAirports,
+public domain). Click LISTEN and the radio retunes from 1090 MHz to the
+channel, demodulates AM voice, and streams it to the browser — pilots,
+controllers, ATIS weather loops. One tuner = one job: the scope pauses
+while you listen (it says so), and STOP → SCOPE brings the planes back.
+Squelch is adjustable (dB over adjacent-band noise, 0 = always open);
+GUARD 121.5 is one click. VHF airband likes a wideband/discone antenna —
+use the antenna selector. Machinery is field-verified (retune, SNR dial,
+squelch, streaming); voice intelligibility depends on your antenna and
+range — airborne transmitters are line-of-sight and much stronger than
+ground stations.
+
 ## Status
 - ✅ Demod + CRC + rescue validated (selftest) and proven live (17 aircraft first capture)
 - ✅ Antenna shootout working — measure, don't assume (our indoor rabbit ears beat two bigger antennas at 1090)
