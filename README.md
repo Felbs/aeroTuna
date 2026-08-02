@@ -39,6 +39,8 @@ on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soap
 | `python tools/adsb.py capture --secs 20` | Live 1090 MHz: demod → CRC gate → confidence rescue → plane table (ICAO, callsign, altitude, speed). |
 | `python tools/adsb.py shootout` | Antenna A/B/C compared by decoded-message count — pick your 1090 MHz antenna empirically, not by folklore. |
 | `python tools/aero_panel.py` | **The ATC scope**: a standing receiver + localhost radar display — blips, leader lines, trails, data blocks, flight strips. `--replay lab/x.cs16` runs it from a frozen capture, no radio needed. |
+| `python tools/uat.py selftest` | **UAT 978 MHz (DO-282)**: no radio — Reed-Solomon (92/72, 30/18, 48/34) at error capacity, FIS-B application layer, DLAC text, and a full synthetic-IQ chain that recovers an injected METAR through the whole radio path. |
+| `python tools/uat.py capture --secs 60` | Live 978 MHz: FIS-B ground uplinks (METARs/TAFs/NOTAMs/NEXRAD the FAA broadcasts to cockpits) + GA aircraft UAT ADS-B. RS-clean payloads archive to `lab/uat_uplinks.jsonl`; `parse` re-reads them offline. |
 
 Hot loops are numba-jitted; a 20 s capture analyzes in ~3 s.
 
