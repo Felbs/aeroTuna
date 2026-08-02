@@ -184,7 +184,10 @@
   </div>
   <div id="listendeck"></div>
   <div id="audrow" style="display:none;padding:4px 14px 6px;border-bottom:1px solid var(--edge)">
-    <audio id="aud" controls style="width:100%;height:28px"></audio>
+    <canvas id="wfmini" width="292" height="104"
+      title="mini waterfall: bright stripe = someone keyed up - click it to tune"
+      style="width:100%;cursor:crosshair;border:1px solid var(--edge)"></canvas>
+    <audio id="aud" controls style="width:100%;height:28px;margin-top:4px"></audio>
     <div id="audhint" style="font-size:10px;color:var(--warn);display:none">
       player paused &mdash; press &#9654; above to hear audio</div>
   </div>
@@ -413,7 +416,6 @@ function draw(ts) {
     cv.width = w * dpr; cv.height = h * dpr;
   }
   cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
-  if (S.data && S.data.sdr.mode === "listen") { drawWaterfall(w, h); return; }
   if (S.view === "3D" && S.center) { draw3d(ts, w, h); return; }
   cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
   const cxp = w / 2, cyp = h / 2;
@@ -646,13 +648,12 @@ function renderSide() {
     lb.textContent = "SCANNING THE AIRBAND — back in ~35 s";
   } else if (d.sdr.mode === "listen") {
     lb.style.display = "block";
-    lb.textContent = `LISTENING ${d.sdr.listen_mhz.toFixed(3)} MHz — scope paused`;
+    lb.textContent = `LISTENING ${d.sdr.listen_mhz.toFixed(3)} MHz — ` +
+      "planes coasting on last data";
   } else lb.style.display = "none";
   const audrow = document.getElementById("audrow");
   const aud = document.getElementById("aud");
   audrow.style.display = d.sdr.mode === "listen" ? "block" : "none";
-  document.getElementById("hint").style.display =
-    d.sdr.mode === "listen" ? "none" : "block";
   document.getElementById("audhint").style.display =
     (d.sdr.mode === "listen" && aud.paused) ? "block" : "none";
   if (!S.tunerTouched) {
@@ -702,59 +703,34 @@ async function pollWaterfall() {
       g.putImageData(im, 0, 150 - d.rows.length + k);
       WF.last = row.id;
     }
+    drawMiniWaterfall();
   } catch (e) {}
 }
 setInterval(pollWaterfall, 1000);
 function wfFreqAt(x, w) {
   return WF.center - WF.span / 2 + (x / w) * WF.span;
 }
-function drawWaterfall(w, h) {
-  cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
-  const plotH = h - 46;
-  cx2.imageSmoothingEnabled = false;
-  cx2.drawImage(WF.img, 0, 0, 1024, 150, 0, 24, w, plotH - 24);
-  cx2.imageSmoothingEnabled = true;
-  const font = "11px Consolas, monospace";
-  cx2.font = font;
-  /* frequency axis */
+function drawMiniWaterfall() {
+  const mc = document.getElementById("wfmini");
+  if (!mc || mc.offsetParent === null) return;
+  const g = mc.getContext("2d");
+  const w = mc.width, h = mc.height, plotH = h - 14;
+  g.fillStyle = "#04070a"; g.fillRect(0, 0, w, h);
+  g.imageSmoothingEnabled = false;
+  g.drawImage(WF.img, 0, 0, 1024, 150, 0, 0, w, plotH);
+  g.imageSmoothingEnabled = true;
+  g.font = "9px Consolas, monospace";
   const f0 = WF.center - WF.span / 2, f1 = WF.center + WF.span / 2;
-  cx2.strokeStyle = "rgba(110,255,160,.25)";
-  cx2.fillStyle = "#6f8a7c";
-  const step = 0.2;
-  for (let f = Math.ceil(f0 / step) * step; f < f1; f += step) {
-    const x = (f - f0) / WF.span * w;
-    cx2.beginPath(); cx2.moveTo(x, plotH); cx2.lineTo(x, plotH + 5);
-    cx2.stroke();
-    cx2.fillText(f.toFixed(1), x - 14, plotH + 17);
-  }
-  /* named channels in view (airport DB) */
-  if (!WF.names && S.freqs) {
-    WF.names = [];
-    for (const ap in S.freqs)
-      for (const r of S.freqs[ap])
-        WF.names.push({ m: r.m, n: ap + " " + r.t });
-  }
-  if (WF.names) {
-    cx2.fillStyle = "rgba(140,190,255,.6)";
-    for (const c of WF.names) {
-      if (c.m < f0 || c.m > f1) continue;
-      const x = (c.m - f0) / WF.span * w;
-      cx2.fillText(c.n, x + 2, 14);
-      cx2.strokeStyle = "rgba(140,190,255,.25)";
-      cx2.beginPath(); cx2.moveTo(x, 18); cx2.lineTo(x, 24); cx2.stroke();
-    }
-  }
-  /* tuned channel cursor */
+  g.fillStyle = "#6f8a7c";
+  g.fillText(f0.toFixed(2), 1, h - 4);
+  g.fillText(f1.toFixed(2), w - 40, h - 4);
   if (S.data && S.data.sdr.listen_mhz) {
     const x = (S.data.sdr.listen_mhz - f0) / WF.span * w;
-    cx2.strokeStyle = "#ffc966";
-    cx2.beginPath(); cx2.moveTo(x, 18); cx2.lineTo(x, plotH); cx2.stroke();
-    cx2.fillStyle = "#ffc966";
-    cx2.fillText(S.data.sdr.listen_mhz.toFixed(3), x + 4, plotH - 6);
+    g.strokeStyle = "#ffc966";
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, plotH); g.stroke();
+    g.fillStyle = "#ffc966";
+    g.fillText(S.data.sdr.listen_mhz.toFixed(3), Math.min(x + 3, w - 46), 8);
   }
-  cx2.fillStyle = "#3d5348";
-  cx2.fillText("waterfall: newest at bottom · a bright vertical stripe = " +
-               "someone keyed up · CLICK a stripe to tune it", 10, h - 10);
 }
 async function listen(mhz) {
   const sqEl = document.getElementById("lsq");
@@ -880,17 +856,16 @@ function projAny(lat, lon) {
   if (S.view === "3D") { const p = proj3(lat, lon, 0); return p && [p[0], p[1]]; }
   return toXY(lat, lon);
 }
-window.addEventListener("mouseup", e => {
-  if (S.drag && !S.drag.moved && S.data
-      && S.data.sdr.mode === "listen" && e.target === cv) {
-    /* waterfall click-to-tune: snap to the 5 kHz raster */
-    const rect = cv.getBoundingClientRect();
-    const f = wfFreqAt(e.clientX - rect.left, cv.clientWidth);
+document.addEventListener("click", e => {
+  if (e.target && e.target.id === "wfmini") {
+    /* mini-waterfall click-to-tune: snap to the 5 kHz raster */
+    const rect = e.target.getBoundingClientRect();
+    const f = wfFreqAt(e.clientX - rect.left, rect.width);
     const snapped = Math.round(f * 200) / 200;
     if (snapped > 118 && snapped < 137) listen(snapped);
-    S.drag = null;
-    return;
   }
+});
+window.addEventListener("mouseup", e => {
   if (S.drag && !S.drag.moved && S.data && S.center && e.target === cv) {
     const rect = cv.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
