@@ -179,6 +179,11 @@ class Tracker:
                     modes += m
             out = []
             for a in self.ac.values():
+                # corroboration gate (miscorrect_audit finding: ~3.5% of
+                # rescued frames carry a ghost ICAO): an aircraft earns a
+                # strip with 2+ messages - one lone frame never displays
+                if a["msgs"] < 2:
+                    continue
                 e = {k: a[k] for k in ("icao", "msgs", "rescued", "modes",
                                        "callsign", "alt_ft", "speed_kt",
                                        "track_deg", "vr_fpm", "squawk",
@@ -737,6 +742,10 @@ def make_handler(tracker, rx):
                     self._send(200, '{"ok": true}')
             elif u.path == "/scan":
                 rx.pending["scan"] = True
+                if rx.state != "RUNNING":
+                    # no radio yet: say so instead of queuing silently
+                    rx.scan = {"busy": True, "waiting": True,
+                               "t": time.time(), "results": []}
                 self._send(200, '{"ok": true}')
             elif u.path == "/waterfall.json":
                 q = parse_qs(u.query)

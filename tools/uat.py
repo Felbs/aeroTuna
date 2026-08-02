@@ -559,8 +559,8 @@ def cmd_selftest(args):
 
 def cmd_capture(args):
     rl = adsb.fleet_lock()
-    if rl and not rl.acquire("uat_rx", "UAT 978 first light", 60,
-                             wait_s=args.wait):
+    if rl and not rl.acquire("uat_rx", "UAT 978 first light",
+                             int(args.prio), wait_s=args.wait):
         busy = rl.status() or {}
         print(f"[uat] radio held by {busy.get('owner', '?')} "
               f"(p{busy.get('priority', '?')}) - aborting, no bare open")
@@ -570,16 +570,16 @@ def cmd_capture(args):
         from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CS16
         SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
         last = None
-        for att in range(5):        # API needs a beat after a client exits
-            try:
+        for att in range(12):       # API refuses opens 60-90 s post-close
+            try:                     # (post-yield beat can run ~30-40 s)
                 sdr = SoapySDR.Device("driver=sdrplay")
                 break
             except Exception as e:
                 last = e
-                print(f"[uat] open attempt {att + 1}/5: {e}")
-                time.sleep(5.0)
+                print(f"[uat] open attempt {att + 1}/12: {e}")
+                time.sleep(8.0)
         else:
-            raise RuntimeError(f"SDR open failed after 5 tries: {last}")
+            raise RuntimeError(f"SDR open failed after 12 tries: {last}")
         sdr.setSampleRate(SOAPY_SDR_RX, 0, FS)
         fs_rb = sdr.getSampleRate(SOAPY_SDR_RX, 0)
         sdr.setFrequency(SOAPY_SDR_RX, 0, FREQ)
@@ -698,6 +698,8 @@ def main():
     c.add_argument("--wait", type=float, default=30)
     c.add_argument("--thresh", type=float, default=52,
                    help="sync correlation threshold of 72 (RS gates ghosts)")
+    c.add_argument("--prio", type=int, default=60,
+                   help="radio_lock priority (default 60 = user-driven)")
     sub.add_parser("parse")
     args = ap.parse_args()
     if args.cmd == "selftest":

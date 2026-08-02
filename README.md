@@ -106,7 +106,9 @@ ground stations.
 - ✅ Confidence rescue beats blind flipping 1.33× at 0.0% hard-ghost rate on a frozen 480 MB corpus (`tools/rescue_ab.py`)
 - ✅ CPR position decode (global + local, mode-s.org known vectors in selftest) + velocity vectors (track, vertical rate)
 - ✅ Live ATC scope (`tools/aero_panel.py`)
-- ⏳ Next: miscorrection audit of rescued frames, dump1090 A/B harness, Mode S (DF4/5/20/21) altitude/ident replies
+- ✅ Mode S replies (DF11 + whitelist-gated DF4/5/20/21), airband voice + mini waterfall + band scan, UAT 978 decoder (selftest-complete; live reception pending)
+- ✅ Miscorrection audit (`tools/miscorrect_audit.py`): confidence rescue repairs 42% more frames than blind flipping at a 1.6% field-mismatch rate (same failure class as blind); ghost-ICAO rate 3.5% → the panel requires 2 corroborating messages before an aircraft displays
+- ⏳ Next: dump1090 A/B referee live, NEXRAD FIS-B renderer (needs UAT reception), surface position (TC 5-8)
 
 ## Hardware
 Any SoapySDR-supported SDR (reference: SDRplay RSPdx) + any antenna — the
