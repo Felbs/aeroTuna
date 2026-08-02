@@ -105,7 +105,7 @@
   <canvas id="scope"></canvas>
   <div id="offline">PANEL OFFLINE</div>
   <div id="hint">drag pan &middot; wheel zoom &middot; R recenter &middot;
-    S sweep &middot; click blip/strip select</div>
+    S sweep &middot; M map &middot; click blip/strip select</div>
 </div>
 <div id="side">
   <header>
@@ -145,7 +145,10 @@ const S = {
   pxPerNm: 6,              // zoom
   sel: null, sweep: true, sweepA: 0,
   drag: null, tunerTouched: false,
+  map: null, showMap: true, qth: null,
 };
+fetch("/basemap.json").then(r => r.json()).then(m => { S.map = m; })
+  .catch(() => {});
 
 /* ---------------- geometry ---------------- */
 function toXY(lat, lon) {           // nm east/north of center -> canvas px
@@ -187,6 +190,52 @@ function draw(ts) {
   cx2.fillStyle = "#04070a"; cx2.fillRect(0, 0, w, h);
   const cxp = w / 2, cyp = h / 2;
   const font = "11px Consolas, monospace";
+
+  /* basemap: coast + state borders + airports, beneath everything */
+  if (S.showMap && S.map && S.center) {
+    const span = Math.max(w, h) / S.pxPerNm / 60;   // degrees on screen
+    const [la0, lo0] = S.center;
+    cx2.strokeStyle = "rgba(120,170,150,.22)";
+    cx2.lineWidth = 1;
+    for (const line of S.map.lines) {
+      let pen = false;
+      cx2.beginPath();
+      for (const [lon, lat] of line) {
+        if (Math.abs(lat - la0) > span && Math.abs(lon - lo0) > span * 2) {
+          pen = false; continue;
+        }
+        const [x, y] = toXY(lat, lon);
+        if (pen) cx2.lineTo(x, y); else { cx2.moveTo(x, y); pen = true; }
+      }
+      cx2.stroke();
+    }
+    const showM = S.pxPerNm > 3;      /* medium airports at closer zooms */
+    cx2.font = font;
+    for (const a of S.map.airports) {
+      if (Math.abs(a.la - la0) > span || Math.abs(a.lo - lo0) > span) continue;
+      if (a.t === "M" && !showM) continue;
+      const [x, y] = toXY(a.la, a.lo);
+      if (x < -20 || y < -20 || x > w + 20 || y > h + 20) continue;
+      cx2.strokeStyle = "rgba(140,190,255,.5)";
+      cx2.beginPath();
+      cx2.moveTo(x - 4, y + 3); cx2.lineTo(x, y - 4); cx2.lineTo(x + 4, y + 3);
+      cx2.closePath(); cx2.stroke();
+      cx2.fillStyle = "rgba(140,190,255,.55)";
+      cx2.fillText(a.c, x + 6, y + 4);
+    }
+    /* RX marker: you are here */
+    if (S.qth) {
+      const [x, y] = toXY(S.qth.lat, S.qth.lon);
+      cx2.strokeStyle = "#ffc966";
+      cx2.beginPath(); cx2.arc(x, y, 6, 0, 7); cx2.stroke();
+      cx2.beginPath();
+      cx2.moveTo(x - 10, y); cx2.lineTo(x + 10, y);
+      cx2.moveTo(x, y - 10); cx2.lineTo(x, y + 10);
+      cx2.stroke();
+      cx2.fillStyle = "#ffc966";
+      cx2.fillText("RX", x + 9, y - 6);
+    }
+  }
 
   /* rings + compass */
   const step = ringStep();
@@ -299,6 +348,14 @@ function fmtStrip(a) {
   const pos = nofix ? "no position (waiting for CPR pair)"
     : `${a.lat.toFixed(4)}, ${a.lon.toFixed(4)} (${Math.round(a.pos_age)}s)`;
   const rp = a.msgs ? Math.round(100 * a.rescued / a.msgs) : 0;
+  let rxline = "";
+  if (S.qth && a.lat != null) {
+    const dy = (a.lat - S.qth.lat) * 60;
+    const dx = (a.lon - S.qth.lon) * 60 * Math.cos(S.qth.lat * Math.PI / 180);
+    const dist = Math.hypot(dx, dy);
+    const brg = (Math.round(Math.atan2(dx, dy) * 180 / Math.PI) + 360) % 360;
+    rxline = `<br>from RX: ${dist.toFixed(1)} nm @ ${String(brg).padStart(3, "0")}&deg;`;
+  }
   return `<div class="strip ${a.icao === S.sel ? "sel" : ""} ${nofix ? "nofix" : ""}"
        data-icao="${a.icao}">
     <div class="r1 ${oldc}"><span class="cs">${cs}</span>
@@ -307,7 +364,7 @@ function fmtStrip(a) {
     <div class="r2 ${oldc}"><span><b>${alt}</b>${vs}</span><span><b>${spd}</b></span>
       <span><b>${trk}</b></span>
       <span style="margin-left:auto">${Math.round(a.age)}s</span></div>
-    <div class="ext">pos ${pos}<br>
+    <div class="ext">pos ${pos}${rxline}<br>
       msgs ${a.msgs} &middot; rescued ${a.rescued} (${rp}%)</div>
   </div>`;
 }
@@ -353,8 +410,11 @@ async function poll() {
     S.data = await r.json();
     S.fetchedAt = performance.now();
     S.ok = true;
+    S.qth = S.data.qth || null;
     if (!S.center) {
-      const c = centroid(S.data.aircraft);
+      /* the receiver position (lab/qth.json, local-only) wins; else
+         center on the traffic we can hear */
+      const c = S.qth ? [S.qth.lat, S.qth.lon] : centroid(S.data.aircraft);
       if (c) S.center = c;
     }
     renderSide();
@@ -399,9 +459,11 @@ cv.addEventListener("wheel", e => {
 }, { passive: false });
 window.addEventListener("keydown", e => {
   if (e.key === "r" || e.key === "R") {
-    const c = S.data && centroid(S.data.aircraft);
+    const c = S.qth ? [S.qth.lat, S.qth.lon]
+                    : (S.data && centroid(S.data.aircraft));
     if (c) S.center = c;
   } else if (e.key === "s" || e.key === "S") S.sweep = !S.sweep;
+  else if (e.key === "m" || e.key === "M") S.showMap = !S.showMap;
 });
 for (const id of ["ant", "gain"])
   document.getElementById(id).addEventListener("input",

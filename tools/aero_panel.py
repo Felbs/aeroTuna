@@ -409,6 +409,18 @@ class Receiver(threading.Thread):
 # ==========================================================================
 # http server
 # ==========================================================================
+def load_qth():
+    """Optional receiver position for the scope's RX marker and centering.
+    PRIVATE BY CONSTRUCTION: lives in lab/qth.json - lab/ is gitignored,
+    nothing here is served beyond 127.0.0.1, and the basemap is embedded
+    (no tile servers: your position never leaves the machine)."""
+    try:
+        q = json.loads((HERE.parent / "lab" / "qth.json").read_text())
+        return {"lat": float(q["lat"]), "lon": float(q["lon"])}
+    except Exception:
+        return None
+
+
 def make_handler(tracker, rx):
     class H(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -436,7 +448,14 @@ def make_handler(tracker, rx):
                 snap = tracker.snapshot(now)
                 snap["t"] = now
                 snap["sdr"] = rx.status()
+                snap["qth"] = load_qth()
                 self._send(200, json.dumps(snap))
+            elif u.path == "/basemap.json":
+                bm = HERE / "basemap.json"
+                if bm.is_file():
+                    self._send(200, bm.read_bytes())
+                else:
+                    self._send(404, "{}")
             elif u.path == "/set":
                 q = parse_qs(u.query)
                 if "antenna" in q:

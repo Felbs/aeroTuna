@@ -65,6 +65,15 @@ hidden), **rescued** (messages that exist only because of the confidence
 plane), and an SDR state chip that names who holds the radio instead of
 spinning silently.
 
+**Basemap, offline by design:** coastlines, state borders and ~5,300
+airports ship in the repo (`tools/basemap.json`, Natural Earth +
+OurAirports, both public domain) and render under the scope — press
+`M` to toggle. No tile servers, no network: your view of the sky never
+leaves your machine. To pin the scope on your receiver ("RX" marker +
+range/bearing per aircraft), drop a `lab/qth.json` with
+`{"lat": ..., "lon": ...}` — `lab/` is gitignored, so your position
+stays local by construction.
+
 ## Status
 - ✅ Demod + CRC + rescue validated (selftest) and proven live (17 aircraft first capture)
 - ✅ Antenna shootout working — measure, don't assume (our indoor rabbit ears beat two bigger antennas at 1090)
