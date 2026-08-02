@@ -496,6 +496,16 @@ class Receiver(threading.Thread):
                 self.detail = f"{e} (x{stalls})"
             finally:
                 self._close(sdr, st)
+                # DESTROY the Device, not just the stream: the SDRplay API
+                # session belongs to this PROCESS until the object dies, and
+                # the service reports 'no available RSP devices' to every
+                # other process while it lives. Measured 8/02: tools waited
+                # 96 s in vain while we merely closed the stream; our own
+                # reopen worked instantly (same session). del = real yield.
+                try:
+                    del sdr, st
+                except Exception:
+                    pass
                 if self.rl:
                     self.rl.release(OWNER)
             if self.state == "YIELDED":
