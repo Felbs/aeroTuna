@@ -221,6 +221,127 @@ def id13_squawk(bits):
             f"{c4 * 4 + c2 * 2 + c1}{d4 * 4 + d2 * 2 + d1}")
 
 
+# ==========================================================================
+# Comm-B meteorology: aircraft as weather probes (the KNMI method)
+# ==========================================================================
+def _mb(bits):
+    """DF20/21 Comm-B MB field: message bits 32..87 as 1-based accessor."""
+    return bits[32:88]
+
+
+def _mbf(mb, a, b):
+    """MB bits a..b inclusive, 1-based (the DO-181/Mode-S convention)."""
+    v = 0
+    for i in range(a - 1, b):
+        v = (v << 1) | int(mb[i])
+    return v
+
+
+def _mbs(mb, a, b):
+    """Signed two's-complement MB field a..b (sign bit at a)."""
+    v = _mbf(mb, a, b)
+    n = b - a + 1
+    if v & (1 << (n - 1)):
+        v -= 1 << n
+    return v
+
+
+def bds50(bits):
+    """BDS 5,0 track & turn: roll, true track, ground speed, TAS.
+    Returns dict or None if any status bit says 'invalid'."""
+    mb = _mb(bits)
+    if not (mb[0] and mb[11] and mb[23] and mb[45]):
+        return None
+    roll = _mbs(mb, 2, 11) * 45.0 / 256.0
+    trk = (_mbs(mb, 13, 23) * 90.0 / 512.0) % 360.0
+    gs = _mbf(mb, 25, 34) * 2.0
+    tas = _mbf(mb, 47, 56) * 2.0
+    return {"roll": round(roll, 1), "trk": round(trk, 1),
+            "gs": gs, "tas": tas}
+
+
+def bds60(bits):
+    """BDS 6,0 heading & speed: magnetic heading, IAS, Mach."""
+    mb = _mb(bits)
+    if not (mb[0] and mb[12] and mb[23]):
+        return None
+    hdg = (_mbs(mb, 2, 12) * 90.0 / 512.0) % 360.0
+    ias = _mbf(mb, 14, 23)
+    mach = _mbf(mb, 25, 34) * 2.048 / 512.0
+    return {"hdg": round(hdg, 1), "ias": ias, "mach": round(mach, 3)}
+
+
+def bds44(bits):
+    """BDS 4,4 meteorological routine air report (direct wind/temp;
+    rarely interrogated in US airspace but decoded when present)."""
+    mb = _mb(bits)
+    if not mb[4]:                       # wind status
+        return None
+    wspd = _mbf(mb, 6, 14)
+    wdir = _mbf(mb, 15, 23) * 180.0 / 256.0
+    # temperature spans MB 24..34: sign at 24, magnitude 25..34 (11 bits
+    # total). Pinned against pyModeS temp44 - a 10-bit read halves it.
+    temp = _mbs(mb, 24, 34) * 0.25
+    out = {"wind_kt": wspd, "wind_dir": round(wdir, 1),
+           "temp_c": round(temp, 2)}
+    if mb[49]:                          # humidity status
+        out["rh_pct"] = round(_mbf(mb, 50, 56) * 100.0 / 64.0, 1)
+    return out
+
+
+def classify_commb(bits, truth):
+    """Heuristic BDS classification for a DF20/21 reply, validated
+    against the aircraft's OWN ADS-B state (`truth`: gs/track when
+    fresh). The whitelist trick again: a register only counts when its
+    decoded fields agree with what the aircraft says about itself.
+    Returns (bds, fields) or (None, None)."""
+    t_gs = truth.get("speed_kt")
+    t_trk = truth.get("track_deg")
+    f = bds50(bits)
+    if f and 80 <= f["tas"] <= 620 and abs(f["roll"]) <= 40 \
+            and t_gs is not None and abs(f["gs"] - t_gs) <= 25 \
+            and t_trk is not None \
+            and min(abs(f["trk"] - t_trk),
+                    360 - abs(f["trk"] - t_trk)) <= 12:
+        return "5,0", f
+    f = bds60(bits)
+    if f and 0.1 <= f["mach"] <= 0.96 and 80 <= f["ias"] <= 500 \
+            and t_trk is not None \
+            and min(abs(f["hdg"] - t_trk),
+                    360 - abs(f["hdg"] - t_trk)) <= 35:
+        return "6,0", f
+    f = bds44(bits)
+    if f and f["wind_kt"] <= 250 and -80 <= f["temp_c"] <= 60:
+        return "4,4", f
+    return None, None
+
+
+def derive_met(state):
+    """The KNMI derivation from accumulated Comm-B + ADS-B state:
+    wind = ground vector - air vector; temperature from Mach vs TAS
+    (TAS_kt = 38.968 * M * sqrt(T_K)). Needs tas+hdg+gs+track fresh."""
+    try:
+        tas, hdg = state["tas"], state["hdg"]
+        gs, trk = state["gs"], state["trk"]
+    except KeyError:
+        return None
+    import math as _m
+    gx = gs * _m.sin(_m.radians(trk))
+    gy = gs * _m.cos(_m.radians(trk))
+    ax = tas * _m.sin(_m.radians(hdg))
+    ay = tas * _m.cos(_m.radians(hdg))
+    wx, wy = gx - ax, gy - ay
+    wspd = _m.hypot(wx, wy)
+    wdir = (_m.degrees(_m.atan2(wx, wy)) + 180.0) % 360.0  # FROM direction
+    out = {"wind_kt": round(wspd, 1), "wind_dir": round(wdir, 1)}
+    mach = state.get("mach")
+    if mach and mach > 0.05:
+        t_k = (tas / (38.968 * mach)) ** 2
+        if 150 <= t_k <= 350:
+            out["temp_c"] = round(t_k - 273.15, 1)
+    return out
+
+
 def decode_modes_fields(bits, df):
     """Field decode for interrogation replies (whitelist-matched 'ap')."""
     info = {}
@@ -619,6 +740,24 @@ def cmd_selftest(args):
     print(f"    DF5 reply: addr={crc24(b5):06X} squawk={id13_squawk(b5)}"
           f"  {'OK' if hit else 'FAIL'}")
     ok &= hit
+    # 2e. Comm-B meteorology: the wind-triangle derivation end to end
+    print("[2e] aircraft as weather probes (BDS 5,0 + 6,0 -> wind/temp)")
+    # a plane flying north at 450 kt TAS in a 50 kt westerly:
+    # ground vector = air vector + wind vector
+    state = {"tas": 450.0, "hdg": 0.0, "gs": 452.8, "trk": 6.3,
+             "mach": 0.784}
+    got = derive_met(state)
+    hit = got and abs(got["wind_kt"] - 50.0) < 2.0 \
+        and abs(((got["wind_dir"] - 270.0 + 180) % 360) - 180) < 3.0
+    print(f"    wind triangle -> {got['wind_kt']} kt from {got['wind_dir']}"
+          f" deg (want ~50 from ~270)  {'OK' if hit else 'FAIL'}")
+    ok &= bool(hit)
+    # TAS 450 kt at M0.784 -> T = (450/(38.968*0.784))^2 = 216.8 K = -56 C
+    hit = got and got.get("temp_c") is not None \
+        and abs(got["temp_c"] + 56.4) < 2.0
+    print(f"    Mach/TAS -> {got.get('temp_c')} C (want ~-56, "
+          f"tropopause)  {'OK' if hit else 'FAIL'}")
+    ok &= bool(hit)
     # 3. synthetic IQ roundtrip (+ noise), incl. confidence-guided rescue
     print("[3] synthetic IQ roundtrip")
     rng = np.random.default_rng(1)

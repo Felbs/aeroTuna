@@ -57,6 +57,7 @@ MAX_RESCUE_PER_BLOCK = 300      # honesty cap: count what we skip
 class Tracker:
     def __init__(self):
         self.lock = threading.Lock()
+        self.df_census = {}
         self.ac = {}
         self.blocks = deque(maxlen=240)     # (t, cand, ok, rescued) ~2 min
 
@@ -95,6 +96,11 @@ class Tracker:
                 a = self.ac.get(f["addr"])
                 if a is None:
                     continue
+                # census: which reply types actually reach us. US radars
+                # often run elementary surveillance (DF4/5 only), so
+                # Comm-B (DF20/21) harvests can be genuinely absent -
+                # measure it instead of assuming (8/03).
+                self.df_census[f["df"]] = self.df_census.get(f["df"], 0) + 1
                 a["msgs"] += 1
                 a["modes"] += 1
                 a["last"] = now
@@ -104,6 +110,27 @@ class Tracker:
                     if k == "alt_ft" and "lat" in a:
                         continue        # ES altitude wins for ES aircraft
                     a[k] = v
+                # aircraft as weather probes: Comm-B registers, accepted
+                # only when they agree with the plane's OWN ADS-B state
+                if f["df"] in (20, 21):
+                    bds, fields = adsb.classify_commb(f["bits"], a)
+                    if bds:
+                        met = a.setdefault("met", {})
+                        met.update(fields)
+                        met["t"] = now
+                        met["bds"] = bds
+                        if bds == "4,4":       # direct report wins
+                            a["wx"] = {k: v for k, v in fields.items()
+                                       if k in ("wind_kt", "wind_dir",
+                                                "temp_c", "rh_pct")}
+                            a["wx"]["src"] = "BDS4,4"
+                            a["wx"]["t"] = now
+                        else:
+                            d = adsb.derive_met(met)
+                            if d:
+                                d["src"] = "derived"
+                                d["t"] = now
+                                a["wx"] = d
             self.blocks.append((now, n_candidates, len(frames_ok),
                                 len(frames_rescued), n_modes))
             # prune the long-gone
@@ -187,7 +214,7 @@ class Tracker:
                 e = {k: a[k] for k in ("icao", "msgs", "rescued", "modes",
                                        "callsign", "alt_ft", "speed_kt",
                                        "track_deg", "vr_fpm", "squawk",
-                                       "lat", "lon") if k in a}
+                                       "lat", "lon", "wx") if k in a}
                 e["age"] = round(now - a["last"], 1)
                 if "pos_t" in a:
                     e["pos_age"] = round(now - a["pos_t"], 1)
@@ -201,7 +228,9 @@ class Tracker:
                               "rescued_60": resc, "modes_60": modes,
                               "msg_min": (ok + resc + modes),
                               "aircraft": len(out),
-                              "with_pos": sum(1 for e in out if "lat" in e)}}
+                              "with_pos": sum(1 for e in out if "lat" in e),
+                              "with_wx": sum(1 for e in out if "wx" in e),
+                              "df_census": dict(self.df_census)}}
 
 
 # ==========================================================================

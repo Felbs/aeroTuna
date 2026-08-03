@@ -49,7 +49,7 @@
   header h1 span { color: var(--phos); }
   header .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
   #tiles {
-    display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 1px;
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 1px;
     background: var(--edge); border-bottom: 1px solid var(--edge);
   }
   .tile { background: var(--panel); padding: 8px 6px 7px; text-align: center; }
@@ -160,6 +160,7 @@
     <div class="tile"><div class="v" id="t_msg">&ndash;</div><div class="l">MSG/MIN</div></div>
     <div class="tile"><div class="v" id="t_resc">&ndash;</div><div class="l">RESCUED</div></div>
     <div class="tile"><div class="v" id="t_modes">&ndash;</div><div class="l">MODE S</div></div>
+    <div class="tile"><div class="v" id="t_wx">&ndash;</div><div class="l">WX PROBES</div></div>
     <div class="tile"><div class="v" id="t_del">&ndash;</div><div class="l">DELIVERY</div></div>
   </div>
   <div id="sdrline">
@@ -594,6 +595,16 @@ function fmtStrip(a) {
   const pos = nofix ? "no position (waiting for CPR pair)"
     : `${a.lat.toFixed(4)}, ${a.lon.toFixed(4)} (${Math.round(a.pos_age)}s)`;
   const rp = a.msgs ? Math.round(100 * a.rescued / a.msgs) : 0;
+  let wxline = "";
+  if (a.wx) {
+    const w = a.wx;
+    wxline = `<br><span style="color:#9fd0ff">&#x1F32C; wind ` +
+      `${Math.round(w.wind_kt)} kt from ` +
+      `${String(Math.round(w.wind_dir)).padStart(3,"0")}&deg;` +
+      (w.temp_c != null ? ` &middot; ${w.temp_c}&deg;C` : "") +
+      (w.rh_pct != null ? ` &middot; RH ${w.rh_pct}%` : "") +
+      ` <span style="color:var(--faint)">(${w.src})</span></span>`;
+  }
   let rxline = "";
   if (S.qth && a.lat != null) {
     const dy = (a.lat - S.qth.lat) * 60;
@@ -613,7 +624,7 @@ function fmtStrip(a) {
       <span style="margin-left:auto">${Math.round(a.age)}s</span></div>
     <div class="ext">pos ${pos}${rxline}<br>
       msgs ${a.msgs} &middot; rescued ${a.rescued} (${rp}%)
-      &middot; mode-S ${a.modes || 0}</div>
+      &middot; mode-S ${a.modes || 0}${wxline}</div>
   </div>`;
 }
 function renderSide() {
@@ -623,6 +634,7 @@ function renderSide() {
   document.getElementById("t_msg").textContent = st.msg_min;
   document.getElementById("t_resc").textContent = st.rescued_60;
   document.getElementById("t_modes").textContent = st.modes_60 ?? "–";
+  document.getElementById("t_wx").textContent = st.with_wx ?? "–";
   const del = d.sdr.delivery;
   document.getElementById("t_del").textContent = del == null ? "–" : del + "%";
   const dot = document.getElementById("sdrdot");
