@@ -148,14 +148,24 @@ PRESS_MIN_HPA, PRESS_MAX_HPA = 100, 1100
 def parse_bds44(mb, strict=True):
     """56-bit MB -> BDS 4,4 fields, or None on ANY status/range failure.
 
+    Field layout independently confirmed against pyModeS
+    (decoder/bds/bds44.py) - see the selftest's referee section.
+
     strict=True additionally rejects:
       * figure of merit 0 ("source invalid") - the aircraft is telling
         us the report is not trustworthy, and allowing it costs us a
         strong discriminator (see classify()).
+      * a report with NO wind (wind status bit clear).  pyModeS's is44
+        does the same: MRAR without wind is both useless to us and much
+        harder to tell apart from another register.
       * static air temperature exactly 0.00 C - the signature of a
         mostly-empty payload.  KNOWN FALSE NEGATIVE: a genuine report
         of exactly 0.00 C is discarded (~1 in 500 near freezing).
-    Both are togglable so the cost can be measured, not assumed.
+        pyModeS is looser here (it rejects only when wind, direction
+        AND temperature are all zero); ours costs recall to buy
+        precision, which is the right trade when the null hypothesis
+        is "nobody here transmits MRAR at all".
+    All are togglable so the cost can be measured, not assumed.
     """
     mb = np.asarray(mb, np.uint8)
     if mb.size != 56 or not mb.any():
@@ -178,6 +188,8 @@ def parse_bds44(mb, strict=True):
         out["wind_dir"] = round(mbu(mb, 15, 23) * 180.0 / 256.0, 1)
         if out["wind_dir"] >= 360.0:
             return None
+    elif strict:
+        return None                       # no wind -> not the report we hunt
     else:
         out["wind_kt"] = None
         out["wind_dir"] = None
@@ -784,7 +796,8 @@ def cmd_selftest(_args):
               f" rh={got['rh_pct']}  {'OK' if hit else 'FAIL'}")
         ok &= hit
     # the classic bug, explicitly: negative temperatures must survive
-    neg = parse_bds44(encode_bds44(fom=1, sat_c=-56.5))
+    neg = parse_bds44(encode_bds44(fom=1, wind_kt=80.0, wind_dir=270.0,
+                                   sat_c=-56.5))
     hit = neg is not None and neg["sat_c"] == -56.5
     print(f"    SIGN TRAP: -56.50 C round-trips -> {neg and neg['sat_c']}"
           f"  {'OK' if hit else 'FAIL'}")
@@ -803,11 +816,14 @@ def cmd_selftest(_args):
     bad.append(("figure of merit 7 (reserved)", mb2))
     mb2 = encode_bds44(fom=1, wind_kt=400.0, wind_dir=90.0, sat_c=-40.0)
     bad.append(("wind 400 kt (over gate)", mb2))
-    mb2 = encode_bds44(fom=1, sat_c=-40.0, press_hpa=1013)
+    mb2 = encode_bds44(fom=1, wind_kt=50.0, wind_dir=90.0, sat_c=-40.0,
+                       press_hpa=1013)
     mb2[34] = 0                                        # press status 0, data set
     bad.append(("pressure status 0 with data", mb2))
-    mb2 = encode_bds44(fom=1, sat_c=-40.0); mb_put(mb2, 24, 34, 0x2FF)
+    mb2 = mb.copy(); mb_put(mb2, 24, 34, 0x2FF)
     bad.append(("SAT +191 C (out of range)", mb2))
+    mb2 = mb.copy(); mb2[4] = 0; mb_put(mb2, 6, 23, 0)
+    bad.append(("no wind at all (strict: not MRAR)", mb2))
     bad.append(("all-zero MB", np.zeros(56, np.uint8)))
     for name, m in bad:
         got = parse_bds44(m)
@@ -997,6 +1013,101 @@ def cmd_selftest(_args):
     f6as44 = parse_bds44(mb6, strict=False)
     print(f"    a random BDS 6,0 read as 4,4 -> "
           f"{'rejected by parser' if f6as44 is None else f6as44}")
+
+    # ---- 6. EXTERNAL REFEREE: pyModeS -------------------------------------
+    # An independent implementation of the same spec.  If it disagrees
+    # about a field, one of us has the bit layout wrong - and a wrong
+    # layout is exactly the failure this whole module exists to avoid.
+    # Optional: a fresh clone without pyModeS still passes everything else.
+    print("[6] external referee: pyModeS bds44")
+    try:
+        from pyModeS.decoder.bds import bds44 as ref
+    except Exception as e:
+        print(f"    pyModeS not available ({e.__class__.__name__}) - SKIPPED "
+              f"(this rung of the ladder is unproven on this machine)")
+        ref = None
+    if ref is not None:
+        # UPSTREAM BUG FOUND 8/05 while building this referee: pyModeS's
+        # compiled c_common.bin2int overflows a 32-bit int on 56-bit
+        # inputs and returns a NEGATIVE value, so common.allzeros() says
+        # "all zeros" for any MB field whose top bit region makes the
+        # wrap negative - which silently breaks EVERY isXX() register
+        # sniffer in the library (is44 rejected 2309/3993 valid MRAR
+        # payloads here).  The pure-Python py_common is correct, so we
+        # bind the reference module to that before comparing.  Worth
+        # reporting upstream; also a reminder that a referee is a
+        # witness, not an authority.
+        try:
+            from pyModeS import common as _pmc, py_common as _pmp
+            probe = "0" * 8 + "1" * 48
+            if _pmc.bin2int(probe) != _pmp.bin2int(probe):
+                print(f"    UPSTREAM BUG: pyModeS c_common.bin2int overflows "
+                      f"on 56-bit fields ({_pmc.bin2int(probe)} vs correct "
+                      f"{_pmp.bin2int(probe)}) -> allzeros()/isXX() are "
+                      f"unreliable on this build; binding the reference to "
+                      f"py_common")
+                ref.common = _pmp
+        except Exception as e:
+            print(f"    (could not probe pyModeS primitives: {e})")
+        def _hexmsg(mb):
+            """Wrap a 56-bit MB into a 28-hexdigit message; pyModeS reads
+            MB as msg[8:22]."""
+            v = 0
+            for b in mb:
+                v = (v << 1) | int(b)
+            return "A0000000" + f"{v:014X}" + "000000"
+
+        n_cmp = n_agree = n_is44 = 0
+        rng2 = np.random.default_rng(7)
+        for _ in range(4000):
+            c = dict(fom=int(rng2.integers(1, 5)),
+                     wind_kt=float(int(rng2.integers(0, 251))),
+                     wind_dir=float(int(rng2.integers(0, 360))),
+                     sat_c=round(float(rng2.uniform(-79, 59)) * 4) / 4.0,
+                     press_hpa=int(rng2.integers(150, 1050)),
+                     turb=int(rng2.integers(0, 4)),
+                     rh_pct=float(int(rng2.integers(0, 99))))
+            mb = encode_bds44(**c)
+            mine = parse_bds44(mb)
+            if mine is None:
+                continue
+            n_cmp += 1
+            h = _hexmsg(mb)
+            rs, rd = ref.wind44(h)
+            # we round to 1 dp / 2 dp on output; compare at OUR precision
+            agree = (rs == int(mine["wind_kt"])
+                     and round(rd, 1) == mine["wind_dir"]
+                     and abs(ref.temp44(h) - mine["sat_c"]) < 1e-9
+                     and ref.p44(h) == mine["press_hpa"]
+                     and ref.turb44(h) == mine["turb"]
+                     and round(ref.hum44(h), 1) == mine["rh_pct"])
+            n_agree += int(agree)
+            n_is44 += int(bool(ref.is44(h)))
+        hit = n_cmp > 0 and n_agree == n_cmp and n_is44 == n_cmp
+        print(f"    {n_cmp} payloads compared: fields agree {n_agree}/{n_cmp}, "
+              f"pyModeS is44() agrees {n_is44}/{n_cmp}  "
+              f"{'OK' if hit else 'FAIL'}")
+        ok &= hit
+        # ... and the reverse: everything WE accept, pyModeS accepts, but
+        # not everything pyModeS accepts do we - by design.
+        rng3 = np.random.default_rng(8)
+        both = only_ref = only_us = 0
+        for _ in range(20000):
+            mb = rng3.integers(0, 2, 56).astype(np.uint8)
+            h = _hexmsg(mb)
+            try:
+                r = bool(ref.is44(h))
+            except Exception:
+                continue
+            m = parse_bds44(mb) is not None
+            both += int(r and m)
+            only_ref += int(r and not m)
+            only_us += int(m and not r)
+        print(f"    random payloads n=20000: both accept {both}, "
+              f"pyModeS-only {only_ref}, OURS-only {only_us}")
+        print(f"    (ours-only must be 0 - we are strictly tighter than the "
+              f"reference)  {'OK' if only_us == 0 else 'FAIL'}")
+        ok &= only_us == 0
 
     print("=" * 70)
     print("SELFTEST", "PASS" if ok else "FAIL")
