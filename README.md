@@ -41,6 +41,9 @@ on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soap
 | `python tools/aero_panel.py` | **The ATC scope**: a standing receiver + localhost radar display — blips, leader lines, trails, data blocks, flight strips. `--replay lab/x.cs16` runs it from a frozen capture, no radio needed. |
 | `python tools/uat.py selftest` | **UAT 978 MHz (DO-282)**: no radio — Reed-Solomon (92/72, 30/18, 48/34) at error capacity, FIS-B application layer, DLAC text, and a full synthetic-IQ chain that recovers an injected METAR through the whole radio path. |
 | `python tools/uat.py capture --secs 60` | Live 978 MHz: FIS-B ground uplinks (METARs/TAFs/NOTAMs/NEXRAD the FAA broadcasts to cockpits) + GA aircraft UAT ADS-B. RS-clean payloads archive to `lab/uat_uplinks.jsonl`; `parse` re-reads them offline. |
+| `python tools/bds.py selftest` | **BDS 4,4 — airliners as radiosondes.** No radio: field roundtrip through the real frame path, status-bit rejection, whitelist discipline, and a Monte-Carlo false-positive measurement against the registers that actually fly (2,0 / 4,0 / 5,0 / 6,0). |
+| `python tools/bds.py replay --iq <cs16>` | Archived 1090 IQ → DF20/21 census, whitelist pass rate, register census, BDS 4,4 reports to `lab/bds44.jsonl`. `--inject N` splices synthetic MRAR replies onto the real RF background as a positive control. |
+| `python tools/bds.py capture --secs 30` | Live MRAR probe, fleet-warden gated (`radio_lock`, priority 50, polite waiting, heartbeats, capture-integrity gate). |
 
 Hot loops are numba-jitted; a 20 s capture analyzes in ~3 s.
 
@@ -109,6 +112,7 @@ ground stations.
 - ✅ Mode S replies (DF11 + whitelist-gated DF4/5/20/21), airband voice + mini waterfall + band scan, UAT 978 decoder (selftest-complete; live reception pending)
 - ✅ Miscorrection audit (`tools/miscorrect_audit.py`): confidence rescue repairs 42% more frames than blind flipping at a 1.6% field-mismatch rate (same failure class as blind); ghost-ICAO rate 3.5% → the panel requires 2 corroborating messages before an aircraft displays
 - ✅ External referee (`tools/referee_pymodes.py`): pyModeS agrees with every decoded field on 279 native frames — zero mismatches (ICAO, callsign, altitude, speed, track, vertical rate)
+- ✅ BDS 4,4 meteorological routine air report (`tools/bds.py`): full field set, and — the hard part — honest register discrimination. A Comm-B reply carries no register ID, so a wrong guess yields *plausible-looking garbage weather*. Measured: realistic BDS 2,0/4,0/5,0/6,0 payloads leak into "BDS 4,4" **0.0000%** of the time (n=20,000), because those registers put a status bit where 4,4 keeps its source code — a uniform-random payload leaks 0.12% at the parser and **0.0033%** after the standard-atmosphere referee. Positive control: synthetic MRAR spliced onto a real 30 s archive is recovered field-exact. **No real BDS 4,4 has been heard yet** — MRAR is not part of Enhanced Surveillance, so North American radars are not known to poll it. That zero is the measurement, not a bug.
 - ⏳ Next: NEXRAD FIS-B renderer (needs UAT reception), surface position (TC 5-8), dump1090 IQ-level A/B
 
 ## Hardware

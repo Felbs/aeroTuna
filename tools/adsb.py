@@ -273,7 +273,12 @@ def bds60(bits):
 
 def bds44(bits):
     """BDS 4,4 meteorological routine air report (direct wind/temp;
-    rarely interrogated in US airspace but decoded when present)."""
+    rarely interrogated in US airspace but decoded when present).
+
+    QUICK-LOOK ONLY. The rigorous decoder - full field set, status-bit
+    consistency, register discrimination against 2,0/4,0/5,0/6,0 and a
+    standard-atmosphere referee - is tools/bds.py (task #55). Prefer it
+    for anything that gets published as weather."""
     mb = _mb(bits)
     if not mb[4]:                       # wind status
         return None
@@ -284,8 +289,11 @@ def bds44(bits):
     temp = _mbs(mb, 24, 34) * 0.25
     out = {"wind_kt": wspd, "wind_dir": round(wdir, 1),
            "temp_c": round(temp, 2)}
-    if mb[49]:                          # humidity status
-        out["rh_pct"] = round(_mbf(mb, 50, 56) * 100.0 / 64.0, 1)
+    if mb[49]:                          # humidity status at MB 50
+        # FIXED 8/05: the value is MB 51..56 (6 bits, LSB 100/64). The
+        # old read started at 50 - it swallowed the status bit itself
+        # and doubled every humidity reading.
+        out["rh_pct"] = round(_mbf(mb, 51, 56) * 100.0 / 64.0, 1)
     return out
 
 
