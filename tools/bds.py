@@ -1327,8 +1327,32 @@ def cmd_capture(args):
             return 2
         print(f"[capture] {args.secs:.0f}s @ 1090 MHz, {args.antenna}, "
               f"fs={FS/1e6} MS/s (adsb.py's proven path)")
-        t0 = time.time()
         sdr, stm = adsb.open_sdr(args.antenna, args.gain, FS)
+        # READ BACK every control write. A writeSetting that was not
+        # read back is a hope, not a setting (fleet law).
+        try:
+            import SoapySDR
+            from SoapySDR import SOAPY_SDR_RX as _RX
+            rb = {"fs_hz": sdr.getSampleRate(_RX, 0),
+                  "freq_hz": sdr.getFrequency(_RX, 0),
+                  "antenna": sdr.getAntenna(_RX, 0),
+                  "agc": sdr.getGainMode(_RX, 0)}
+            try:
+                rb["IFGR"] = sdr.getGain(_RX, 0, "IFGR")
+                rb["rfgain_sel"] = sdr.readSetting("rfgain_sel")
+            except Exception:
+                pass
+            print(f"[readback] {rb}")
+            if abs(rb["fs_hz"] - FS) > 1.0 or abs(rb["freq_hz"] - adsb.FREQ) > 1e3:
+                print("[readback] radio is NOT where we asked - aborting")
+                return 1
+            if rb["antenna"] != args.antenna:
+                print(f"[readback] antenna is {rb['antenna']}, asked "
+                      f"{args.antenna} - continuing but the port is NOT "
+                      f"what was requested")
+        except Exception as e:
+            print(f"[readback] could not verify radio state: {e}")
+        t0 = time.time()
         n_want = int(args.secs * FS)
         buf = np.empty(2 * 65536, np.int16)
         out = np.empty(2 * n_want, np.int16)
@@ -1364,15 +1388,21 @@ def cmd_capture(args):
             #                                handoff fix from d73f9af)
         wall = time.time() - t0
         # ---- CAPTURE-INTEGRITY GATE -------------------------------------
+        # samples == wall * fs, or the capture is VOID. Two dials: how
+        # much of what we ASKED for arrived, and how much of the time we
+        # actually SPENT on the radio arrived (delivery - a stalled
+        # stream shows up here and nowhere else).
         want = args.secs * FS
         ratio = got / want if want else 0.0
+        delivery = got / (wall * FS) if wall > 0 else 0.0
         print(f"[integrity] samples={got} want={int(want)} "
-              f"({ratio*100:.2f}%), wall={wall:.1f}s")
+              f"({ratio*100:.2f}%), wall={wall:.2f}s, "
+              f"delivery={delivery*100:.2f}% of wall*fs")
         if aborted:
             print(f"[integrity] aborted: {aborted}")
-        if ratio < 0.99:
-            print("[integrity] VOID - short capture, no weather claimed "
-                  "from it")
+        if ratio < 0.99 or delivery < 0.99:
+            print("[integrity] VOID - short or starved capture. No weather "
+                  "is claimed from it.")
             return 1
         iq = (out[0::2].astype(np.float32)
               + 1j * out[1::2].astype(np.float32)) / 32768.0
