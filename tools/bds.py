@@ -718,6 +718,41 @@ def harvest(iq, stats=None, whitelist=None, t0=None, origin="replay",
     return st, wl
 
 
+def sweep_array(iq, chunk_s=2.0, emit_path=OUT_JSONL, strict=True,
+                verbose=False, origin="live", two_pass=True, t0=None):
+    """Harvest a whole in-memory capture the SAME way replay does:
+    in chunks, with two passes over the whitelist.
+
+    BOTH parts matter and both were learned the hard way on 8/05.
+
+    * CHUNKING: adsb.demod_frames() caps the number of frames one call
+      may return, so handing it a 90 s array truncates the scan - the
+      first live run reported 2,048 candidates and 15 aircraft where
+      the chunked sweep of the SAME samples finds 13,153 and 24.  A
+      capture analysed in one call silently throws most of itself away.
+    * TWO PASSES: offline we are not obliged to be causal, so an
+      aircraft that ADS-Bs at t=80s still validates its Comm-B reply
+      at t=3s.
+    """
+    n = len(iq)
+    step = max(int(chunk_s * FS), 1 << 16)
+    overlap = 512
+    wl = {}
+    if two_pass:
+        i = 0
+        while i < n:
+            harvest(iq[i:i + step], stats=_new_stats(), whitelist=wl,
+                    emit_path=None, wl_only=True)
+            i += step - overlap
+    st = _new_stats()
+    i = 0
+    while i < n:
+        harvest(iq[i:i + step], stats=st, whitelist=wl, origin=origin,
+                emit_path=emit_path, strict=strict, verbose=verbose, t0=t0)
+        i += step - overlap
+    return st, wl
+
+
 def _new_stats():
     return {"candidates": 0, "es_ok": 0, "df11": 0, "ap": 0, "commb": 0,
             "commb_whitelisted": 0, "commb_no_whitelist": 0,
@@ -1359,6 +1394,9 @@ def cmd_capture(args):
         got = 0
         last_hb = 0.0
         aborted = None
+        t_first = None                    # when samples actually began
+        n_at_first = 0
+        codes = {}                        # driver status codes seen
         try:
             while got < n_want:
                 r = sdr.readStream(stm, [buf], 65536, timeoutUs=1_000_000)
@@ -1366,9 +1404,20 @@ def cmd_capture(args):
                     n = min(r.ret, n_want - got)
                     out[2 * got: 2 * (got + n)] = buf[:2 * n]
                     got += n
-                elif r.ret < 0 and r.ret != -1:
-                    aborted = f"stream error {r.ret}"
-                    break
+                    if t_first is None:
+                        t_first = time.time()
+                        n_at_first = got
+                elif r.ret < 0:
+                    # -1 timeout is benign (no data ready yet). Anything
+                    # else means the STREAM ITSELF lost or mangled data:
+                    # -4 overflow is the driver telling us its ring
+                    # buffer wrapped, i.e. a GAP in the RF record. That
+                    # is the real capture-integrity failure, and it must
+                    # be counted, not inferred from a wall-clock ratio.
+                    codes[r.ret] = codes.get(r.ret, 0) + 1
+                    if r.ret != -1:
+                        aborted = f"stream status {r.ret}"
+                        break
                 now = time.time()
                 if now - last_hb >= 5.0:
                     last_hb = now
@@ -1386,44 +1435,87 @@ def cmd_capture(args):
             sdr.closeStream(stm)
             del sdr                        # destroy the Device (the SDRplay
             #                                handoff fix from d73f9af)
-        wall = time.time() - t0
+        t_end = time.time()
+        wall = t_end - t0
         # ---- CAPTURE-INTEGRITY GATE -------------------------------------
         # samples == wall * fs, or the capture is VOID. Two dials: how
         # much of what we ASKED for arrived, and how much of the time we
-        # actually SPENT on the radio arrived (delivery - a stalled
-        # stream shows up here and nowhere else).
+        # actually SPENT STREAMING arrived (delivery - a stalled stream
+        # shows up here and nowhere else).
+        #
+        # Delivery is measured from the FIRST sample, not from stream
+        # setup.  Activating the stream and filling the USB pipeline
+        # costs a fixed ~1 s before any sample exists; charging that to
+        # delivery makes a perfect 60.00 s capture read as 98% and VOIDs
+        # good data (it did exactly that on the first live run, 8/05).
+        # Starvation means samples stop arriving DURING the stream, and
+        # that is what this now measures.
         want = args.secs * FS
         ratio = got / want if want else 0.0
-        delivery = got / (wall * FS) if wall > 0 else 0.0
-        print(f"[integrity] samples={got} want={int(want)} "
-              f"({ratio*100:.2f}%), wall={wall:.2f}s, "
-              f"delivery={delivery*100:.2f}% of wall*fs")
+        startup = (t_first - t0) if t_first else float("nan")
+        stream_wall = (t_end - t_first) if t_first else 0.0
+        streamed = got - n_at_first
+        efficiency = (streamed / (stream_wall * FS)) if stream_wall > 0 else 0.0
+        gaps = sum(v for k, v in codes.items() if k != -1)
+        print(f"[integrity] samples={got}/{int(want)} ({ratio*100:.2f}%)  "
+              f"stream_wall={stream_wall:.2f}s  start-up={startup:.2f}s")
+        print(f"[integrity] driver status codes: {codes or 'none'}  "
+              f"-> {gaps} gap/overflow events")
+        print(f"[integrity] read-loop efficiency {efficiency*100:.2f}% "
+              f"(samples per wall second; <100% here is OUR per-read "
+              f"overhead while the device buffers, not lost RF - the "
+              f"driver reports gaps explicitly and reported {gaps})")
+        # THE GATE.  This is a fixed-COUNT capture: we read until we hold
+        # n_want samples, so the honest question is not "did wall*fs
+        # match" but "are these n_want samples a CONTIGUOUS record".
+        # Evidence required: the full count, zero overflow/corruption/
+        # stream-error codes from the driver, and no gross stall.
+        # (8/05: the first two live runs were VOIDed by a wall-clock
+        # ratio that was really measuring this loop's own memcpy cost.
+        # Fixing the measurement, not the threshold - the driver's own
+        # gap reporting is the ground truth for lost RF.)
+        stalled = stream_wall > 1.25 * args.secs
+        void = ratio < 0.999 or gaps > 0 or stalled or aborted
         if aborted:
             print(f"[integrity] aborted: {aborted}")
-        if ratio < 0.99 or delivery < 0.99:
-            print("[integrity] VOID - short or starved capture. No weather "
-                  "is claimed from it.")
-            return 1
+        if stalled:
+            print(f"[integrity] gross stall: {stream_wall:.1f}s of wall for "
+                  f"{args.secs:.0f}s of samples")
         iq = (out[0::2].astype(np.float32)
               + 1j * out[1::2].astype(np.float32)) / 32768.0
         iq = iq[:got].astype(np.complex64)
-        if args.save_iq:
+        if args.save_iq and got > 0:
+            # Archive BEFORE the verdict gate: a capture we paid the
+            # radio for is replay material either way - just labelled
+            # with its verdict so a VOID record can never be mistaken
+            # for a clean one.
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            p = LAB / f"bds44_{stamp}.cs16"
+            p = LAB / f"bds44_{stamp}{'_VOID' if void else ''}.cs16"
             out[:2 * got].tofile(p)
             json.dump({"freq_hz": adsb.FREQ, "fs_hz": FS, "format": "cs16",
                        "n_samples": int(got), "secs": got / FS,
-                       "antenna": args.antenna, "gain": args.gain},
+                       "antenna": args.antenna, "gain": args.gain,
+                       "integrity": "VOID" if void else "OK",
+                       "stream_wall_s": round(stream_wall, 3),
+                       "driver_status_codes": {str(k): v
+                                               for k, v in codes.items()},
+                       "gap_events": gaps},
                       open(str(p) + ".json", "w"))
-            print(f"[corpus] {p.name} ({got*4/1e6:.0f} MB) archived for replay")
+            print(f"[corpus] {p.name} ({got*4/1e6:.0f} MB) archived "
+                  f"({'VOID' if void else 'integrity OK'})")
+        if void:
+            print("[integrity] VOID - no weather is claimed from this "
+                  "capture.")
+            return 1
+        print("[integrity] OK - contiguous record, gate passed")
     finally:
         rl.release(owner)
         print("[capture] radio released")
-    st, wl = harvest(iq, origin="live",
-                     emit_path=None if args.no_emit else Path(args.out
-                                                              or OUT_JSONL),
-                     strict=not args.loose, verbose=True,
-                     t0=time.time())
+    st, wl = sweep_array(iq, chunk_s=2.0, origin="live",
+                         emit_path=None if args.no_emit else Path(
+                             args.out or OUT_JSONL),
+                         strict=not args.loose, verbose=True,
+                         t0=time.time())
     print_stats(st)
     print(f"  aircraft on whitelist : {len(wl)}")
     return 0
