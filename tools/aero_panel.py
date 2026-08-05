@@ -44,6 +44,12 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import adsb  # noqa: E402  (our decoder is the whole point)
+try:    # optional: strict BDS 4,4 register discrimination (task #55).
+    # Imported as bds_mod because `bds` is a local variable in the
+    # tracker's Comm-B branch and would shadow the module.
+    import bds as bds_mod  # noqa: E402
+except Exception:
+    bds_mod = None
 
 FS = adsb.FS
 BLOCK_S = 0.5
@@ -120,11 +126,31 @@ class Tracker:
                         met["t"] = now
                         met["bds"] = bds
                         if bds == "4,4":       # direct report wins
-                            a["wx"] = {k: v for k, v in fields.items()
-                                       if k in ("wind_kt", "wind_dir",
-                                                "temp_c", "rh_pct")}
-                            a["wx"]["src"] = "BDS4,4"
-                            a["wx"]["t"] = now
+                            # ...but ONLY if the strict discriminator
+                            # agrees the register really is 4,4 (task
+                            # #55). A Comm-B reply carries no register
+                            # ID, so a loose accept paints invented
+                            # weather on the scope. Fail CLOSED: if the
+                            # strict module is missing or throws, show
+                            # nothing rather than something wrong.
+                            conf = None
+                            if bds_mod is not None:
+                                try:
+                                    conf = bds_mod.classify(
+                                        f["bits"], truth=a,
+                                        alt_ft=a.get("alt_ft"))
+                                except Exception:
+                                    conf = None
+                            if conf and conf.get("bds") == "4,4":
+                                g = conf["fields"]
+                                a["wx"] = {"wind_kt": g.get("wind_kt"),
+                                           "wind_dir": g.get("wind_dir"),
+                                           "temp_c": g.get("sat_c"),
+                                           "rh_pct": g.get("rh_pct"),
+                                           "src": "BDS4,4",
+                                           "verdict":
+                                               conf["plausibility"]["verdict"],
+                                           "t": now}
                         else:
                             d = adsb.derive_met(met)
                             if d:
