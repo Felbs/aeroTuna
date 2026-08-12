@@ -2,6 +2,8 @@
 
 **Adaptive ADS-B decoding — the TV Tuna method pointed at 1090 MHz.**
 
+**Project site:** [felbs.software](https://felbs.software) · **Contact:** [E@felbs.software](mailto:E@felbs.software)
+
 Born 2026-07-17 from the [Software-TV-Tuner](https://github.com/Felbs/Software-TV-Tuner)
 lineage (TV Tuna → [Radio Tuna](https://github.com/Felbs/gr-radiotuna) →
 [wxTuna](https://github.com/Felbs/wxTuna) → aeroTuna). Same thesis, new sky:
