@@ -457,6 +457,17 @@ class Receiver(threading.Thread):
         return iq.astype(np.complex64), min(1.0, n_want / (wall * FS))
 
     def _run_live(self):
+        # 8/20: shutdown during the ERROR/BUSY retry sleep used to return
+        # with the p80 lock still held (found as today's stale-lock leak) -
+        # the wrapper releases on EVERY exit path, exceptions included.
+        # release() is owner+pid-checked, so a double release is a no-op.
+        try:
+            self._run_live_inner()
+        finally:
+            if self.rl:
+                self.rl.release(OWNER)
+
+    def _run_live_inner(self):
         n_blk = int(BLOCK_S * FS)
         stalls = 0
         while not self.shutdown:
@@ -919,6 +930,8 @@ def main():
         rx.join(timeout=10.0)
     finally:
         srv.shutdown()
+        if rx.rl:                    # belt-and-suspenders vs. lock leak:
+            rx.rl.release(OWNER)     # owner+pid-checked no-op if not held
 
 
 if __name__ == "__main__":
