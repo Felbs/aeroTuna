@@ -32,7 +32,8 @@ python tools/aero_panel.py               # THE ATC SCOPE: http://127.0.0.1:8646
 **Dependencies:** `numpy`, `numba`, and the `SoapySDR` python bindings +
 a driver for your SDR. Easiest path on any OS is
 [radioconda](https://github.com/ryanvolz/radioconda) (has all three);
-on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soapysdr-module-all`.
+on Debian/Ubuntu: `apt install python3-numpy python3-numba python3-soapysdr soapysdr-module-all`;
+on Arch/Omarchy: `pacman -S python-numpy python-numba soapysdr soapyrtlsdr` (SDRplay: `yay -S libsdrplay soapysdrplay3-git`).
 
 ## Tools
 | Command | What it does |
