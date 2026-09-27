@@ -599,6 +599,17 @@ def cmd_capture(args):
         st = sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
         sdr.activateStream(st)
         n_want = int(args.secs * FS)
+        # RAM guard (2026-09-27): raw int16 -> complex64 -> float32 phase makes ~16 bytes per
+        # sample; a 120 s run (250 M samples, ~4 GB) got this scope killed by systemd-oomd on an
+        # 8 GB laptop. Refuse before capturing; the message names a length that fits.
+        _need = n_want * 16
+        try:
+            _avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError, AttributeError):
+            _avail = None
+        if _avail and _need > 0.6 * _avail:
+            raise MemoryError(f"{args.secs:.0f} s needs ~{_need / 1e9:.1f} GB with {_avail / 1e9:.1f} GB free "
+                              f"- use --secs {int(args.secs * 0.6 * _avail / _need)} or less")
         buf = np.empty(2 * 65536, np.int16)
         got = 0
         chunks = []
