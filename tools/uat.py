@@ -604,7 +604,7 @@ def cmd_capture(args):
         # 8 GB laptop. Refuse before capturing; the message names a length that fits.
         _need = n_want * 16
         try:
-            _avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            _avail = int(next((l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemAvailable:")), "0")) * 1024  # MemAvailable, not MemFree: page cache is reclaimable (2026-09-28)
         except (ValueError, OSError, AttributeError):
             _avail = None
         if _avail and _need > 0.6 * _avail:
